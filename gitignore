@@ -1,0 +1,37 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.Python
+
+# --- 仮想環境（venv同梱配布方式のため、リポジトリには含めない） ---
+venv/
+.venv/
+env/
+d_liner_runtime_env/
+
+# --- 実行時に生成されるランチャー（setup_runtime_env.py が都度生成） ---
+launch_d_liner.bat
+launch_d_liner_debug.bat
+
+# --- ユーザーの実データ・実行時生成物 ---
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+crash_log.txt
+thumbnail_cache/
+*.cache
+
+# --- タグ付けモデル本体（初回起動時にHugging Faceから自動取得するため追跡しない） ---
+models/
+*.onnx
+*.onnx.json
+
+# --- OS / エディタ ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
