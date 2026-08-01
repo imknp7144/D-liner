@@ -14,28 +14,28 @@ AI画像生成物（イラスト・生成画像等）を対象とした、Window
 ---
 ## スクリーンショット
 
-![メイン画面](docs/images/main_window.webp)
+![メイン画面](docs/image/main_window.webp)
 *フォルダツリー・タグ検索・サムネイルグリッドの構成。ファイル名検索とタグ検索を同じ検索窓で扱う*
 
-![SDIビューア](docs/images/sdi_viewer.webp)
+![SDIビューア](docs/image/sdi_viewer.webp)
 *ダブルクリックで開く独立ウィンドウ（Linar最大の特徴を継承）。AI生成イラストにも正確にタグが付与される*
 
-![タグ検索](docs/images/tag_search.webp)
+![タグ検索](docs/image/tag_search.webp)
 *タグによる高速な絞り込み検索*
 
-![タグの手動追加](docs/images/add_tag.webp)
+![タグの手動追加](docs/image/add_tag.webp)
 *AIタグの誤りを手動で修正・追加可能*
 
-![右クリックメニュー](docs/images/context_menu.webp)
+![右クリックメニュー](docs/image/context_menu.webp)
 *複数選択した画像への一括タグ操作、LoRA用エクスポートなどをサポート*
 
-![コピー/類似検索モード](docs/images/copy_mode.webp)
+![コピー/類似検索モード](docs/image/copy_mode.webp)
 *タグパネルをコピーモードに切り替え、タグの組み合わせ検索やクリップボードコピーが可能*
 
-![LoRA用エクスポート](docs/images/lora_export.webp)
+![LoRA用エクスポート](docs/image/lora_export.webp)
 *選択画像を新規フォルダへコピーし、同名の.txtへタグを書き出し。元の画像・DB上のタグは変更しない*
 
-![セットアップ時のNPU自動検出](docs/images/setup.webp)
+![セットアップ時のNPU自動検出](docs/image/setup.webp)
 *`setup_runtime_env.bat`実行時、Intel NPUを自動検出し、対応するランタイムを自動選択する*
 
 ## 主な特徴
