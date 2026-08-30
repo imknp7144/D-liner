@@ -1,0 +1,163 @@
+
+==============================================================
+  D-liner 本体実行用 venv セットアップ
+==============================================================
+[INFO] 日時     : 20260820_040640
+[INFO] 作業 DIR : C:\TOOLS\GRAPHIC_TOOLS\d_liner
+[INFO] Python   : C:\Users\digit\AppData\Local\Programs\Python\Python312\python.exe (3.12.10)
+[INFO] ログ     : C:\TOOLS\GRAPHIC_TOOLS\d_liner\runtime_setup_log_20260820_040640.txt
+
+==============================================================
+  NPU 検出
+==============================================================
+[INFO] PowerShell 検出結果:
+Intel(R) AI Boost
+[OK]   NPU デバイスを検出しました: Intel(R) AI Boost
+[OK]   → npu 系統（onnxruntime-openvino + openvino）を選択します。
+
+==============================================================
+  VC++ Redistributable 検出
+==============================================================
+[OK]   VC++ Redistributable (x64) 検出: v14.50.35710.00
+
+==============================================================
+  venv 作成: d_liner_runtime_env
+==============================================================
+[OK]   既存 venv を再利用: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env
+[INFO] RUN: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Scripts\python.exe --version
+    Python 3.12.10
+
+==============================================================
+  パッケージインストール（D-liner 本体実行用・npu系統）
+==============================================================
+[INFO] RUN: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Scripts\python.exe -m pip install --upgrade pip --quiet
+[INFO] 既存の onnxruntime 系パッケージ（変種混在防止のため）をクリーンアップ中...
+[INFO] RUN: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Scripts\python.exe -m pip uninstall -y onnxruntime onnxruntime-directml onnxruntime-openvino onnxruntime-gpu
+    Found existing installation: onnxruntime-openvino 1.24.1
+    Uninstalling onnxruntime-openvino-1.24.1:
+      Successfully uninstalled onnxruntime-openvino-1.24.1
+    STDERR: WARNING: Skipping onnxruntime as it is not installed.
+    STDERR: WARNING: Skipping onnxruntime-directml as it is not installed.
+    STDERR: WARNING: Skipping onnxruntime-gpu as it is not installed.
+[INFO] インストール対象: ['PyQt6>=6.7', 'numpy>=1.26', 'Pillow>=10.0', 'psutil', 'huggingface_hub', 'send2trash', 'piexif>=1.1.3', 'onnxruntime-openvino==1.24.1', 'openvino==2025.4.1']
+[INFO] RUN: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Scripts\python.exe -m pip install PyQt6>=6.7 numpy>=1.26 Pillow>=10.0 psutil huggingface_hub send2trash piexif>=1.1.3 onnxruntime-openvino==1.24.1 openvino==2025.4.1
+    Requirement already satisfied: PyQt6>=6.7 in .\d_liner_runtime_env\Lib\site-packages (6.11.0)
+    Requirement already satisfied: numpy>=1.26 in .\d_liner_runtime_env\Lib\site-packages (2.3.5)
+    Requirement already satisfied: Pillow>=10.0 in .\d_liner_runtime_env\Lib\site-packages (12.3.0)
+    Requirement already satisfied: psutil in .\d_liner_runtime_env\Lib\site-packages (7.2.2)
+    Requirement already satisfied: huggingface_hub in .\d_liner_runtime_env\Lib\site-packages (1.28.0)
+    Requirement already satisfied: send2trash in .\d_liner_runtime_env\Lib\site-packages (2.1.0)
+    Collecting piexif>=1.1.3
+      Using cached piexif-1.1.3-py2.py3-none-any.whl.metadata (3.7 kB)
+    Collecting onnxruntime-openvino==1.24.1
+      Using cached onnxruntime_openvino-1.24.1-cp312-cp312-win_amd64.whl.metadata (5.1 kB)
+    Requirement already satisfied: openvino==2025.4.1 in .\d_liner_runtime_env\Lib\site-packages (2025.4.1)
+    Requirement already satisfied: flatbuffers in .\d_liner_runtime_env\Lib\site-packages (from onnxruntime-openvino==1.24.1) (25.12.19)
+    Requirement already satisfied: packaging in .\d_liner_runtime_env\Lib\site-packages (from onnxruntime-openvino==1.24.1) (26.3)
+    Requirement already satisfied: protobuf in .\d_liner_runtime_env\Lib\site-packages (from onnxruntime-openvino==1.24.1) (7.35.1)
+    Requirement already satisfied: sympy in .\d_liner_runtime_env\Lib\site-packages (from onnxruntime-openvino==1.24.1) (1.14.0)
+    Requirement already satisfied: openvino-telemetry>=2023.2.1 in .\d_liner_runtime_env\Lib\site-packages (from openvino==2025.4.1) (2025.2.0)
+    Requirement already satisfied: PyQt6-sip<14,>=13.8 in .\d_liner_runtime_env\Lib\site-packages (from PyQt6>=6.7) (13.12.0)
+    Requirement already satisfied: PyQt6-Qt6<6.12.0,>=6.11.0 in .\d_liner_runtime_env\Lib\site-packages (from PyQt6>=6.7) (6.11.1)
+    Requirement already satisfied: click<9.0.0,>=8.4.2 in .\d_liner_runtime_env\Lib\site-packages (from huggingface_hub) (8.4.2)
+    Requirement already satisfied: filelock>=3.10.0 in .\d_liner_runtime_env\Lib\site-packages (from huggingface_hub) (3.32.3)
+    Requirement already satisfied: fsspec>=2023.5.0 in .\d_liner_runtime_env\Lib\site-packages (from huggingface_hub) (2026.7.0)
+    Requirement already satisfied: hf-xet<2.0.0,>=1.5.2 in .\d_liner_runtime_env\Lib\site-packages (from huggingface_hub) (1.6.0)
+    Requirement already satisfied: httpx<1,>=0.23.0 in .\d_liner_runtime_env\Lib\site-packages (from huggingface_hub) (0.28.1)
+    Requirement already satisfied: pyyaml>=5.1 in .\d_liner_runtime_env\Lib\site-packages (from huggingface_hub) (6.0.3)
+    Requirement already satisfied: tqdm>=4.42.1 in .\d_liner_runtime_env\Lib\site-packages (from huggingface_hub) (4.70.0)
+    Requirement already satisfied: typing-extensions>=4.1.0 in .\d_liner_runtime_env\Lib\site-packages (from huggingface_hub) (4.16.0)
+    Requirement already satisfied: colorama in .\d_liner_runtime_env\Lib\site-packages (from click<9.0.0,>=8.4.2->huggingface_hub) (0.4.6)
+    Requirement already satisfied: anyio in .\d_liner_runtime_env\Lib\site-packages (from httpx<1,>=0.23.0->huggingface_hub) (4.14.2)
+    Requirement already satisfied: certifi in .\d_liner_runtime_env\Lib\site-packages (from httpx<1,>=0.23.0->huggingface_hub) (2026.7.22)
+    Requirement already satisfied: httpcore==1.* in .\d_liner_runtime_env\Lib\site-packages (from httpx<1,>=0.23.0->huggingface_hub) (1.0.9)
+    Requirement already satisfied: idna in .\d_liner_runtime_env\Lib\site-packages (from httpx<1,>=0.23.0->huggingface_hub) (3.19)
+    Requirement already satisfied: h11>=0.16 in .\d_liner_runtime_env\Lib\site-packages (from httpcore==1.*->httpx<1,>=0.23.0->huggingface_hub) (0.16.0)
+    Requirement already satisfied: mpmath<1.4,>=1.1.0 in .\d_liner_runtime_env\Lib\site-packages (from sympy->onnxruntime-openvino==1.24.1) (1.3.0)
+    Using cached onnxruntime_openvino-1.24.1-cp312-cp312-win_amd64.whl (13.7 MB)
+    Using cached piexif-1.1.3-py2.py3-none-any.whl (20 kB)
+    Installing collected packages: piexif, onnxruntime-openvino
+    
+    Successfully installed onnxruntime-openvino-1.24.1 piexif-1.1.3
+[INFO] RUN: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Scripts\python.exe -c import onnxruntime as ort; print('ort:', ort.__version__); print('file:', ort.__file__); print('SessionOptions:', ort.SessionOptions); print('EP_LIST:', ort.get_available_providers())
+    ort: 1.24.1
+    file: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Lib\site-packages\onnxruntime\__init__.py
+    SessionOptions: <class 'onnxruntime.capi.onnxruntime_pybind11_state.SessionOptions'>
+    EP_LIST: ['OpenVINOExecutionProvider', 'CPUExecutionProvider']
+[OK]   パッケージインストール完了（npu系統: PyQt6>=6.7, numpy>=1.26, Pillow>=10.0, psutil, huggingface_hub, send2trash, piexif>=1.1.3, onnxruntime-openvino==1.24.1, openvino==2025.4.1）
+[INFO] RUN: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Scripts\python.exe -m pip install onnx --quiet
+
+==============================================================
+  OpenVINO 実セッション probe（NPU/GPU 有効性確認）
+==============================================================
+[INFO] RUN: C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Scripts\python.exe -c 
+import sys
+if sys.platform == "win32":
+    try:
+        import onnxruntime.tools.add_openvino_win_libs as ov_libs
+        ov_libs.add_openvino_libs_to_path()
+    except Exception as e:
+        print("ADD_LIBS_FAILED:", e)
+
+import onnxruntime as ort
+import numpy as np
+
+print("EP_LIST:", ort.get_available_providers())
+
+# 最小のダミーONNXモデルをその場で組み立てて実セッション作成を試す
+import onnx
+from onnx import helper, TensorProto
+
+X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3])
+Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3])
+node = helper.make_node("Identity", ["X"], ["Y"])
+graph = helper.make_graph([node], "probe", [X], [Y])
+model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+model.ir_version = 8
+path = "_ov_probe.onnx"
+onnx.save(model, path)
+
+so = ort.SessionOptions()
+for device in ("NPU", "GPU"):
+    try:
+        sess = ort.InferenceSession(
+            path, sess_options=so,
+            providers=[("OpenVINOExecutionProvider", {"device_type": device}), "CPUExecutionProvider"],
+        )
+        used = sess.get_providers()[0]
+        print(f"RESULT_{device}:", used)
+        if used == "OpenVINOExecutionProvider":
+            print("PROBE_OK:", device)
+            break
+    except Exception as e:
+        print(f"RESULT_{device}_ERROR:", e)
+else:
+    print("PROBE_FALLBACK_CPU")
+
+import os
+os.remove(path)
+
+    EP_LIST: ['OpenVINOExecutionProvider', 'CPUExecutionProvider']
+    RESULT_NPU: OpenVINOExecutionProvider
+    PROBE_OK: NPU
+[OK]   OpenVINOExecutionProvider が NPU で有効に動作しています。
+
+==============================================================
+  ランチャー生成
+==============================================================
+[OK]   生成: launch_d_liner.bat（通常起動・コンソール非表示）
+[OK]   生成: launch_d_liner_debug.bat（デバッグ起動・ログ確認用）
+
+==============================================================
+  セットアップ完了
+==============================================================
+[INFO] venv         : C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env
+[INFO] pythonw.exe  : C:\TOOLS\GRAPHIC_TOOLS\d_liner\d_liner_runtime_env\Scripts\pythonw.exe
+[INFO] ランタイム系統: npu
+[INFO] 実行 EP      : OpenVINOExecutionProvider(NPU)
+[INFO] 
+[INFO] 起動方法:
+[INFO]   launch_d_liner.bat をダブルクリック（通常起動）
+[INFO]   launch_d_liner_debug.bat をダブルクリック（コンソール表示・トラブル時）
+[INFO] 
+[INFO] D-liner の設定画面でタグ付けデバイスを NPU/GPU/CPU から選択してください。

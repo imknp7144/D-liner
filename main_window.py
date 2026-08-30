@@ -223,7 +223,7 @@ class MainWindow(QMainWindow):
     """
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("D-liner v0.8")
+        self.setWindowTitle("D-liner v0.9")
         icon_path = _resource_path("d_liner_icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -516,7 +516,7 @@ class MainWindow(QMainWindow):
         action_about = QAction("D-liner について(&A)", self)
         action_about.triggered.connect(lambda: QMessageBox.information(
             self, "D-liner について",
-            "D-liner v0.8\n\nDanbooru タグ × ファイル名ハイブリッド検索対応\nAI生成画像ビューア"
+            "D-liner v0.9\n\nDanbooru タグ × ファイル名ハイブリッド検索対応\nAI生成画像ビューア"
         ))
         help_menu.addAction(action_about)
 
@@ -3373,7 +3373,7 @@ if __name__ == "__main__":
         import ctypes as _ctypes
         try:
             _ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "dliner.app.0.8"
+                "dliner.app.0.9"
             )
         except Exception:
             pass  # 失敗してもアイコン表示以外への影響は無いため無視する

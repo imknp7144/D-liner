@@ -1,0 +1,15 @@
+# metahub_lite dependencies.
+#
+# PyQt6      -- viewer.py (GUI). Not needed for analyze.py/comfy_resolve.py
+#               used standalone (e.g. from D-liner as a library import).
+# Pillow     -- extract.py, all image formats (PNG tEXt chunks, WebP/JPEG
+#               loading). Required.
+# piexif     -- extract.py, WebP/JPEG EXIF field extraction only. extract.py
+#               already degrades gracefully if this is missing (returns
+#               source="exif_unavailable" instead of raising), but without
+#               it, WebP/JPEG metadata extraction silently finds nothing --
+#               install it for full format coverage.
+
+PyQt6>=6.6
+Pillow>=10.0
+piexif>=1.1.3

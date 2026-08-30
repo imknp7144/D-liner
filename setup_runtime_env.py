@@ -112,6 +112,11 @@ COMMON_PACKAGES = [
     # shutil.rmtree() に落ちて即時完全削除になり、誤削除時に復元
     # できなくなる。
     "send2trash",
+    # metahub_lite連携（meta_viewer_launcher.py）用。D-liner本体の
+    # venvをそのまま流用してサブプロセス起動する設計のため、
+    # metahub_lite/requirements.txt が要求するpiexifもここに含める
+    # 必要がある（PyQt6/Pillowは元々共通依存のため追加不要）。
+    "piexif>=1.1.3",
 ]
 
 

@@ -20,9 +20,6 @@ sdi_window_viewer.py から機械的に分離。
 
 from __future__ import annotations
 
-from pathlib import Path
-from datetime import datetime
-
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QSize, QTimer, QSettings, QStringListModel
 from PyQt6.QtGui import (
     QImage, QPixmap, QPainter, QTransform, QKeyEvent, QAction,
@@ -35,25 +32,6 @@ from PyQt6.QtWidgets import (
     QDialog, QLineEdit, QDialogButtonBox, QListWidget, QListWidgetItem,
     QCompleter
 )
-
-
-# ---------------------------------------------------------------------------
-# 【一時デバッグログ】コピーモード背景色バグ（handoff30 C）調査用（セッション31）
-# ---------------------------------------------------------------------------
-# 「コピーモードを維持する」設定でSDIウィンドウを閉じ→別画像を新規に開くと、
-# モード自体は維持されるが背景色だけ検索モードの色に戻る不具合の原因調査。
-# 静的解析・headless再現テストでは原因を特定できなかったため、実機
-# （Windows・4K・150%DPI）でのタイミング・状態を記録し、ログを基に判断する。
-# 原因特定・対応完了後は撤去予定（恒久的なログ出力ではない）。
-_COPY_MODE_BUG_LOG_PATH = Path(__file__).parent / "tag_panel_debug_log.txt"
-
-
-def _debug_log_copy_mode_bug(tag: str, msg: str) -> None:
-    try:
-        with open(_COPY_MODE_BUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat(timespec='milliseconds')} [{tag}] {msg}\n")
-    except Exception:
-        pass  # デバッグログ自体の失敗でアプリ本体に影響を出さないようにする
 
 
 class _FlowLayout(QHBoxLayout):
@@ -521,14 +499,6 @@ class TagPanel(QWidget):
             bg = "#1e1e1e"
             border = "border-top: 1px solid #333333;"
         self.setStyleSheet(f"TagPanel {{ background-color: {bg}; {border} }}")
-        # 【一時デバッグログ】バグC調査用（セッション31）: 設定直後の状態を記録
-        _debug_log_copy_mode_bug(
-            "apply_style",
-            f"id={id(self)} mode={self._mode} bg={bg} "
-            f"visible={self.isVisible()} "
-            f"WA_StyledBackground={self.testAttribute(Qt.WidgetAttribute.WA_StyledBackground)} "
-            f"styleSheet_after={self.styleSheet()!r}",
-        )
 
     def _update_height(self, rows: int) -> None:
         """行数（＋コピーモード中はアクション行分）に合わせてパネル高さを更新する。"""
@@ -563,11 +533,6 @@ class TagPanel(QWidget):
         """
         if mode not in ("search", "copy"):
             mode = "search"
-        # 【一時デバッグログ】バグC調査用（セッション31）: 呼び出し自体の記録
-        _debug_log_copy_mode_bug(
-            "set_mode",
-            f"id={id(self)} old_mode={self._mode} new_mode={mode} visible={self.isVisible()}",
-        )
         self._mode = mode
         # モードを切り替えるたび（方向を問わず）、選択状態と見た目のハイライトを
         # 必ずクリアする（指示書03 C-3・C-4）。チップは使い回されるため、

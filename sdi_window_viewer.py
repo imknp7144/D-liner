@@ -36,6 +36,7 @@ from thumbnail_grid import show_delete_confirm_dialog
 # それぞれ専用ファイルへ移動済み（ロジック変更なしの機械的移動）。
 from tag_panel import TagPanel
 from sdi_image_label import SDIImageLabel
+from meta_viewer_launcher import open_in_meta_viewer, MetaViewerLink
 
 
 class SDIWindow(QMainWindow):
@@ -81,6 +82,7 @@ class SDIWindow(QMainWindow):
         self.linked_mode = False  # 操作連動
         self._first_show_done = False   # show()後の初回再描画フラグ
         self._is_loading = False        # ロード中フラグ（連続ホイール/キー入力の多重ロード防止）
+        self._meta_viewer_link = MetaViewerLink(self)  # 開いたMeta Viewerとの同期リンク
         self.init_ui()
 
         # 前回の表示モードを復元
@@ -293,6 +295,20 @@ class SDIWindow(QMainWindow):
         print_action.setShortcut("Ctrl+P")
         print_action.triggered.connect(self.file_print)
         file_menu.addAction(print_action)
+
+        file_menu.addSeparator()
+
+        # metahub_lite連携（引き継ぎ資料§7-2）: D-liner本体には統合せず、
+        # ファイルパス渡しでサブプロセス起動する疎結合連携。
+        # self.file_path は load_image() の度に更新される「現在表示中の
+        # 画像パス」なので、ホイール/矢印キーでの画像切り替え後も常に
+        # 最新の画像を渡せる。
+        meta_viewer_act = QAction("メタデータビューアで開く(&V)...", self)
+        meta_viewer_act.setShortcut("V")  # C/M/L/R/U/H/T/S/Z と同じ単一キー慣例に合わせる
+        meta_viewer_act.triggered.connect(
+            lambda: self._meta_viewer_link.open(self.file_path)
+        )
+        file_menu.addAction(meta_viewer_act)
 
         # --- 画像 (G) ---
         img_menu = self.menu_bar.addMenu("画像(&G)")
@@ -768,6 +784,11 @@ class SDIWindow(QMainWindow):
 
             # タグパネルを更新（DBからimage_idを引いてタグを非同期取得）
             self._update_tag_panel(self.file_path)
+
+            # 開いているMeta Viewer（meta-onlyモード）があれば追従させる。
+            # 未接続（起動していない/既に閉じられた）なら push() は
+            # 何もしないので、常に呼んで問題ない。
+            self._meta_viewer_link.push(self.file_path)
 
             success = True
             return True
@@ -1628,6 +1649,7 @@ class SDIWindow(QMainWindow):
             settings.setValue("sdi/window_size_h", self.height())
 
         self.closed.emit(self.file_path)
+        self._meta_viewer_link.close()
         super().closeEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:

@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from workers import ThumbnailLoadTask
+from meta_viewer_launcher import open_in_meta_viewer_singleton
 
 
 def show_delete_confirm_dialog(parent: QWidget | None, message_text: str) -> bool:
@@ -920,6 +921,16 @@ class ThumbnailGridWidget(QScrollArea):
         fullscreen_action = QAction("全画面表示", self)
         fullscreen_action.triggered.connect(lambda: self.open_in_sdi.emit(target_item.path))
         menu.addAction(fullscreen_action)
+
+        # metahub_lite連携（引き継ぎ資料§7-2）: D-liner本体には統合せず、
+        # ファイルパス渡しでサブプロセス起動する疎結合連携。
+        # 複数選択中でも「右クリックした1件」のメタデータのみを見る用途の
+        # ため、他のバルク操作系アクションとは異なりtarget_item固定でよい。
+        meta_viewer_action = QAction("メタデータビューアで開く", self)
+        meta_viewer_action.triggered.connect(
+            lambda: open_in_meta_viewer_singleton(self, target_item.path)
+        )
+        menu.addAction(meta_viewer_action)
 
         menu.addSeparator()
 

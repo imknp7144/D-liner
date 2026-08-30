@@ -156,6 +156,16 @@ class _NoExpandFileSystemModel(QFileSystemModel):
             return False
         except PermissionError:
             return super().hasChildren(parent)
+        except OSError:
+            # パス自体が消えている（D-liner外からの削除・外部ドライブ切断等）を
+            # 主眼としつつ、パス長超過・ネットワークドライブ切断等の他の
+            # OSErrorサブクラスも同様に「子なし」として静かに扱う
+            # （外部レビュー2件の指摘を受け、FileNotFoundError限定からOSError
+            # 全体の捕捉に拡大。セッション34）。
+            # QFileSystemModel本体は自前のファイル監視でツリー行を追随させるため、
+            # ここでは追加の監視は行わない
+            # （セッション33: crash_log.txtで報告された未捕捉FileNotFoundError対応）。
+            return False
 
 
 class ScanWorker(QThread):
