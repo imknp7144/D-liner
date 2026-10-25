@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import (
     QDialog,
     QPushButton,
     QDialogButtonBox,
+    QCheckBox,
+    QLineEdit,
 )
 
 from workers import ThumbnailLoadTask
@@ -115,6 +117,54 @@ def show_delete_confirm_dialog(parent: QWidget | None, message_text: str) -> boo
 
     btn_no.setFocus()
     return dlg.exec() == QDialog.DialogCode.Accepted
+
+
+def confirm_overwrite(
+    parent: QWidget | None,
+    fname: str,
+    dest_label: str,
+    remember: dict,
+) -> bool:
+    """
+    コピー/移動/貼り付けでの上書き確認ダイアログ（3箇所で共通利用）。
+
+    「残り全てに適用」チェックボックス付き（セッション35、実機報告への
+    対応）。以前は複数ファイルのコピー/移動時、重複ファイルが出るたびに
+    毎回ダイアログが出る仕様だったため、大量の重複がある場合に確認操作が
+    ファイル数分続く不便があった。
+
+    remember は呼び出し元のループが保持する辞書（{"applied": bool,
+    "answer": bool}）で、チェックボックスがONで確定した回答を後続の
+    呼び出しへ引き継ぐための可変状態として使う。「まとめてYES/NO」を
+    最初に選ばせる方式ではなく、実際に重複が発生した最初の1件で聞いて
+    以降へ適用する方式（重複が0件のときは一度もダイアログを出さずに
+    済む）。
+
+    dest_label: 「コピー先」「移動先」「貼り付け先」等、文脈に応じた文言。
+    """
+    if remember.get("applied"):
+        return remember["answer"]
+
+    box = QMessageBox(parent)
+    box.setWindowTitle("確認")
+    box.setText(f"「{fname}」は{dest_label}に既に存在します。上書きしますか?")
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setStandardButtons(
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    )
+    box.setDefaultButton(QMessageBox.StandardButton.No)
+
+    checkbox = QCheckBox("残り全てに適用")
+    box.setCheckBox(checkbox)
+
+    reply = box.exec()
+    answer = (reply == QMessageBox.StandardButton.Yes)
+
+    if checkbox.isChecked():
+        remember["applied"] = True
+        remember["answer"] = answer
+
+    return answer
 
 
 class ThumbnailLabel(QWidget):
@@ -513,7 +563,8 @@ class ThumbnailGridWidget(QScrollArea):
 
         # 選択状態・スクロール位置の復元を試みる（同一フォルダ内の
         # ファイル操作による再検索であればここでヒットする）
-        if prev_selected_path and self._path_to_index(prev_selected_path) >= 0:
+        _restore_idx = self._path_to_index(prev_selected_path) if prev_selected_path else -1
+        if prev_selected_path and _restore_idx >= 0:
             self.select_by_path(prev_selected_path)
         else:
             self.verticalScrollBar().setValue(0)
@@ -617,7 +668,7 @@ class ThumbnailGridWidget(QScrollArea):
         # 1. 画面内アイテムの生成とロード
         for idx in visible_indices:
             item = self.image_items[idx]
-            img_id, path, _, _, _ = self.image_data[idx]
+            img_id, path, _, _, _, _ = self.image_data[idx]
 
             if item is None:
                 item = ThumbnailLabel(img_id, path, self.grid_container)
@@ -763,7 +814,7 @@ class ThumbnailGridWidget(QScrollArea):
             lo = min(self._last_clicked_idx, idx)
             hi = max(self._last_clicked_idx, idx)
             for i in range(lo, hi + 1):
-                _, p, _, _, _ = self.image_data[i]
+                _, p, _, _, _, _ = self.image_data[i]
                 self.selected_paths.add(p)
                 it = self.image_items[i]
                 if it:
@@ -829,7 +880,7 @@ class ThumbnailGridWidget(QScrollArea):
         last_idx = -1
         last_path = ""
         last_img_id = -1
-        for i, (img_id, p, _, _, _) in enumerate(self.image_data):
+        for i, (img_id, p, _, _, _, _) in enumerate(self.image_data):
             if img_id == -2:
                 continue  # フォルダアイテムは対象外
             self.selected_paths.add(p)
@@ -866,7 +917,7 @@ class ThumbnailGridWidget(QScrollArea):
         self.open_in_sdi.emit(path)
 
     def _path_to_index(self, path: str) -> int:
-        for i, (img_id, p, _, _, _) in enumerate(self.image_data):
+        for i, (img_id, p, _, _, _, _) in enumerate(self.image_data):
             if p == path:
                 return i
         return -1
@@ -1117,6 +1168,11 @@ class ThumbnailGridWidget(QScrollArea):
         from PyQt6.QtGui import QImageReader
         reader = QImageReader(path)
         qimg = reader.read()
+        if qimg.isNull():
+            import image_decode
+            if image_decode.needs_pillow(path):
+                # セッション35: Qt が読めない形式（avif）は Pillow 経由
+                qimg, _pw, _ph = image_decode.read_via_pillow(path)
         if not qimg.isNull():
             QGuiApplication.clipboard().setImage(qimg)
 
@@ -1154,14 +1210,12 @@ class ThumbnailGridWidget(QScrollArea):
 
         errors = []
         ok_count = 0
+        overwrite_remember: dict = {}
         for _img_id, src, fname in targets:
             dest = os.path.join(dest_dir, fname)
             try:
                 if os.path.exists(dest):
-                    reply = QMessageBox.question(self, "確認",
-                        f"「{fname}」はコピー先に既に存在します。上書きしますか?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                    if reply != QMessageBox.StandardButton.Yes:
+                    if not confirm_overwrite(self, fname, "コピー先", overwrite_remember):
                         continue
                 shutil.copy2(src, dest)
                 ok_count += 1
@@ -1189,14 +1243,12 @@ class ThumbnailGridWidget(QScrollArea):
 
         errors = []
         moved_paths = []
+        overwrite_remember: dict = {}
         for img_id, src, fname in targets:
             dest = os.path.join(dest_dir, fname).replace("\\", "/")
             try:
                 if os.path.exists(dest):
-                    reply = QMessageBox.question(self, "確認",
-                        f"「{fname}」は移動先に既に存在します。上書きしますか?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                    if reply != QMessageBox.StandardButton.Yes:
+                    if not confirm_overwrite(self, fname, "移動先", overwrite_remember):
                         continue
                 shutil.move(src, dest)
                 if img_id and img_id != -1:
@@ -1301,6 +1353,7 @@ class ThumbnailGridWidget(QScrollArea):
         errors = []
         ok_count = 0
         moved_src_paths = []
+        overwrite_remember: dict = {}
         for src in src_paths:
             if not os.path.isfile(src):
                 errors.append(f"{src}: ファイルが見つかりません")
@@ -1312,12 +1365,7 @@ class ThumbnailGridWidget(QScrollArea):
                 continue
             try:
                 if os.path.exists(dest):
-                    reply = QMessageBox.question(
-                        self, "確認",
-                        f"「{fname}」は貼り付け先に既に存在します。上書きしますか?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    )
-                    if reply != QMessageBox.StandardButton.Yes:
+                    if not confirm_overwrite(self, fname, "貼り付け先", overwrite_remember):
                         continue
 
                 if is_cut:
@@ -1370,16 +1418,91 @@ class ThumbnailGridWidget(QScrollArea):
     def _rename_file(self, item: ThumbnailLabel) -> None:
         old_path = item.path
         old_name = item.filename
-        new_name, ok = QInputDialog.getText(self, "名前の変更", "新しいファイル名:", text=old_name)
+
+        # バグ修正（セッション35、実機報告）: QInputDialog.getText()（静的メソッド）
+        # は内部QLineEditの初期選択範囲を制御できず、拡張子込みでファイル名全体が
+        # 選択された状態になっていた。Explorer等一般的なファイラーに合わせ、
+        # 拡張子を除いた部分（stem）のみを初期選択状態にするため、インスタンス化
+        # した QInputDialog から内部の QLineEdit を取得して選択範囲を指定する。
+        #
+        # バグ修正2（実機報告）: サンドボックス環境では exec() 前に
+        # setSelection() するだけで効いていたが、実機Windowsでは反映されな
+        # かった。QInputDialog は exec()（表示）時に内部で改めて QLineEdit
+        # へテキストを設定し直しており、事前の選択範囲指定が上書きされて
+        # いたと考えられる。表示後に選択範囲を再設定するため、他箇所（Qt/
+        # 高DPIレンダリングのタイミング問題）で確立済みの
+        # QTimer.singleShot(0, ...) パターンを使う。
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle("名前の変更")
+        dlg.setLabelText("新しいファイル名:")
+        dlg.setTextValue(old_name)
+        line_edit = dlg.findChild(QLineEdit)
+        if line_edit is not None:
+            stem, _ext = os.path.splitext(old_name)
+            # 拡張子が無い場合（stem == old_name）は全体を選択（従来通りの挙動）
+            QTimer.singleShot(0, lambda: line_edit.setSelection(0, len(stem)))
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        new_name = dlg.textValue()
+
         if not ok or not new_name.strip() or new_name == old_name:
             return
         new_name = new_name.strip()
-        new_path = os.path.join(os.path.dirname(old_path), new_name)
+        # バグ修正（セッション36、実機報告の真因）: os.path.join() は
+        # Windowsではos.sep（\）で結合するため、old_pathがスラッシュ区切り
+        # （アプリ内の統一形式）でも new_path だけ区切り文字が混在した
+        # 文字列になっていた（例: ".../XLH\renamed.webp"）。
+        # FilesystemSearchWorker/SearchWorker の検索結果パスは常にスラッシュ
+        # 統一（.replace("\\", "/")）されているため、文字列として一致せず
+        # _path_to_index() が新パスを見つけられず、スクロール/選択位置の
+        # 復元が常に失敗していた（Linuxサンドボックスではos.sepが"/"のため
+        # 再現せず、Windows実機でのみ顕在化していた）。file_move()・SDI側の
+        # file_rename() と同様に明示的に正規化する。
+        new_path = os.path.join(os.path.dirname(old_path), new_name).replace("\\", "/")
         try:
             if os.path.exists(new_path):
                 QMessageBox.warning(self, "エラー", f"「{new_name}」は既に存在します。")
                 return
             os.rename(old_path, new_path)
+
+            # バグ修正（セッション35）: 従来この経路だけDBの images.path を
+            # 更新しておらず（_move_file / 貼り付け / SDIの file_rename() は
+            # いずれも更新している）、DB登録済みフォルダでは再検索結果に旧パス
+            # が残って選択復元に失敗していた。既存の移動処理と同じ id 指定
+            # 更新に揃える（未登録フォルダの image_id=-1 とフォルダ行 -2 は
+            # DB行を持たないため対象外）。失敗してもリネーム自体は成立
+            # しているため例外は握りつぶさずログに残して続行する。
+            _img_id = getattr(item, "img_id", -1)
+            if _img_id is not None and _img_id >= 0:
+                _c = None
+                try:
+                    import lifecycle_manager as _lm
+                    _c = _lm.get_connection()
+                    _c.execute(
+                        "UPDATE images SET path = ?, status = 'ACTIVE' WHERE id = ?",
+                        (new_path, _img_id),
+                    )
+                    _c.commit()
+                except Exception as _e:
+                    print(f"[Grid] rename: DB path update failed "
+                          f"(id={_img_id}): {_e}", flush=True)
+                finally:
+                    if _c is not None:
+                        _c.close()
+
+            # バグ修正（セッション36、実機報告）: リネーム後にスクロール
+            # 位置がフォルダ先頭へ巻き戻る不具合の対応。selected_item_path
+            # が旧パスのまま file_operation_done を発火していたため、
+            # trigger_search() 経由の再検索結果に旧パスが存在せず、
+            # set_images() 側の選択・スクロール位置復元ロジック
+            # （prev_selected_path の照合）が「見つからない」と判定して
+            # 無条件に先頭へスクロールしていた。削除時の
+            # _remove_items_from_grid_batch() と同様、再検索を発火する前に
+            # 選択状態を新パスへ更新しておく。
+            self.selected_item_path = new_path
+            if old_path in self.selected_paths:
+                self.selected_paths.discard(old_path)
+                self.selected_paths.add(new_path)
+
             self.file_operation_done.emit()
         except Exception as e:
             QMessageBox.critical(self, "エラー", f"リネームに失敗しました:\n{e}")
@@ -1599,9 +1722,35 @@ class ThumbnailGridWidget(QScrollArea):
         self.load_visible_thumbnails()
 
     def _reload_single_item(self, item: ThumbnailLabel) -> None:
+        # バグ修正（セッション35、実機報告）: サブフォルダ行（img_id == -2）は
+        # 画像ファイルではなくディレクトリであり、サムネイル読込の対象外
+        # （load_visible_thumbnails() 側も同様に除外している）。
+        # refresh_visible_thumbnails_from_cache()（優先度3完了時の軽量パス）が
+        # 生成済み全ウィジェットをここへ通すため、フォルダ行がディレクトリを
+        # 画像として読み込もうとして「× Error」タイルになっていた。
+        if item.img_id == -2:
+            return
         if item.path in self.cache:
             del self.cache[item.path]
         self._trigger_load(item)
+
+    def refresh_visible_thumbnails_from_cache(self) -> None:
+        """
+        選択・スクロール位置を一切変更せず、現在画面内に生成済みの
+        ThumbnailLabelウィジェットのみサムネイルキャッシュを再読込する。
+
+        BackgroundThumbWorker（優先度3）が新規サムネイルを生成した際、
+        従来はフルの再検索（main_window.trigger_search() → set_images()）
+        で反映していたが、これは選択が無い状態（ホイール操作のみ等）だと
+        復元対象が無いためスクロール位置が先頭へ巻き戻ってしまう不具合
+        があった（セッション35、実機報告）。選択が無いケースではこちらの
+        軽量パスを使い、image_data/image_items のリスト構造自体には
+        触れず、既に生成済みのウィジェットのキャッシュのみを差し替える。
+        """
+        for item in self.image_items:
+            if item is None:
+                continue
+            self._reload_single_item(item)
 
     def _copy_paths_to_clipboard(self, paths: list[str]) -> None:
         clipboard = QGuiApplication.clipboard()
@@ -1612,7 +1761,7 @@ class ThumbnailGridWidget(QScrollArea):
         if not self.image_data:
             return
         idx = max(0, min(idx, len(self.image_data) - 1))
-        _, path, _, _, _ = self.image_data[idx]
+        _, path, _, _, _, _ = self.image_data[idx]
         self.select_by_path(path)
 
     def current_index(self) -> int:

@@ -223,7 +223,7 @@ class MainWindow(QMainWindow):
     """
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("D-liner v0.9")
+        self.setWindowTitle("D-liner v1.0")
         icon_path = _resource_path("d_liner_icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -514,10 +514,9 @@ class MainWindow(QMainWindow):
         # ヘルプメニュー
         help_menu = menubar.addMenu("ヘルプ(&H)")
         action_about = QAction("D-liner について(&A)", self)
-        action_about.triggered.connect(lambda: QMessageBox.information(
-            self, "D-liner について",
-            "D-liner v0.9\n\nDanbooru タグ × ファイル名ハイブリッド検索対応\nAI生成画像ビューア"
-        ))
+        # セッション35: バージョン情報（venv内ライブラリ・画像形式対応状況）を
+        # 表示できるよう version_info.py のダイアログへ差し替え。
+        action_about.triggered.connect(self._on_about)
         help_menu.addAction(action_about)
 
         help_menu.addSeparator()
@@ -614,15 +613,16 @@ class MainWindow(QMainWindow):
 
         # (1) 詳細リスト (Task 5)
         self.details_table = QTableWidget(self)
-        self.details_table.setColumnCount(4)
-        self.details_table.setHorizontalHeaderLabels(["ファイル名", "サイズ", "解像度", "パス"])
+        self.details_table.setColumnCount(5)
+        self.details_table.setHorizontalHeaderLabels(["ファイル名", "サイズ", "追加日時", "解像度", "パス"])
         self.details_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.details_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.details_table.setAlternatingRowColors(True)
         self.details_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.details_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         self.details_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        self.details_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.details_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self.details_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         # フォーカス有無に関わらず選択色・テキスト色を統一
         # Fusionスタイル + Windowsダークモード環境では palette(text) が薄くなるため明示指定
         self.details_table.setStyleSheet("""
@@ -708,11 +708,16 @@ class MainWindow(QMainWindow):
         self.search_timer.setSingleShot(True)
         self.search_timer.timeout.connect(self.trigger_search)
 
-        # F5キー用のQActionバインド
-        self.refresh_action = QAction(self)
-        self.refresh_action.setShortcut("F5")
-        self.refresh_action.triggered.connect(self.trigger_full_refresh)
-        self.addAction(self.refresh_action)
+        # バグ修正（セッション36、実機報告）: F5キーが無反応になっていた。
+        # 原因は、表示メニューの action_refresh_menu（451〜454行目）に既に
+        # shortcut("F5")が設定済みであるのに、ここでも別のQAction
+        # (self.refresh_action) に同じ"F5"を割り当て self.addAction() して
+        # いたため、同一ウィンドウ内に同じキーのQActionが2つ存在する状態に
+        # なっていた。Qtは単一ウィジェット内で同一ショートカットが複数の
+        # QActionに割り当てられていると「曖昧なショートカット」と判定し、
+        # どちらも発火させない（無反応になる）。表示メニュー側のアクション
+        # だけで表示・ショートカット・接続が揃っているため、ここでの重複
+        # バインドは削除した。
 
         # --- ファイラー系ショートカット（Ctrl+C/X/V, F2, F8, Ctrl+F） ---
         #
@@ -1033,6 +1038,10 @@ class MainWindow(QMainWindow):
         self.folder_is_registered, _folder_scan_recursive = self._resolve_folder_watch_info(
             self.current_folder_path
         )
+        # セッション35: サムネイルキャッシュの作成範囲判定用に、登録・お気に入り
+        # フォルダ一覧を最新化する（検索のたびに小さなSELECT1回。登録/解除や
+        # お気に入り変更が、次の表示から反映されるようにするため）
+        self._refresh_cache_scope()
         display_recursive = self.action_show_subfolder_files.isChecked()
 
         if self.folder_is_registered or not self.current_folder_path:
@@ -1093,7 +1102,7 @@ class MainWindow(QMainWindow):
         self.details_table.blockSignals(True)
         self.details_table.setRowCount(len(results))
         
-        for idx, (img_id, path, w, h, size) in enumerate(results):
+        for idx, (img_id, path, w, h, size, added_at) in enumerate(results):
             
             # ファイル名
             filename_item = QTableWidgetItem(os.path.basename(path))
@@ -1112,16 +1121,22 @@ class MainWindow(QMainWindow):
             size_item.setFlags(size_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
             self.details_table.setItem(idx, 1, size_item)
 
+            # 追加日時（未登録フォルダはst_mtime代用、フォルダ行は空文字）
+            added_str = added_at if added_at else "-"
+            added_item = QTableWidgetItem(added_str)
+            added_item.setFlags(added_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+            self.details_table.setItem(idx, 2, added_item)
+
             # 解像度 (w x h)
             res_str = "-" if (w == 0 or h == 0) else f"{w} x {h}"
             res_item = QTableWidgetItem(res_str)
             res_item.setFlags(res_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
-            self.details_table.setItem(idx, 2, res_item)
+            self.details_table.setItem(idx, 3, res_item)
 
             # フルパス
             path_item = QTableWidgetItem(path)
             path_item.setFlags(path_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
-            self.details_table.setItem(idx, 3, path_item)
+            self.details_table.setItem(idx, 4, path_item)
 
         self.details_table.blockSignals(False)
         # データ更新後に列幅を自動調整（Ctrl++ と同じ動作）
@@ -1144,7 +1159,7 @@ class MainWindow(QMainWindow):
             targets = [self.thumbnail_grid.selected_item.path]
         else:
             targets = [
-                path for (img_id, path, _, _, _) in self.thumbnail_grid.image_data
+                path for (img_id, path, _, _, _, _) in self.thumbnail_grid.image_data
                 if img_id != -2  # フォルダアイテムを除外
             ]
         if not targets:
@@ -1285,15 +1300,15 @@ class MainWindow(QMainWindow):
         fm = self.details_table.fontMetrics()
         
         # 各列の最小・最大幅の基準値
-        min_widths = [150, 80, 80] # ファイル名、サイズ、解像度
-        max_widths = [450, 150, 150]
+        min_widths = [150, 80, 130, 80] # ファイル名、サイズ、追加日時、解像度
+        max_widths = [450, 150, 170, 150]
         
         col_widths = list(min_widths)
         
         # 最初の100件のみを走査して最大幅を決定
         scan_limit = min(100, row_count)
         for row in range(scan_limit):
-            for col in range(3):
+            for col in range(4):
                 item = self.details_table.item(row, col)
                 if item:
                     text_w = fm.horizontalAdvance(item.text()) + 16 # パディング追加
@@ -1302,13 +1317,13 @@ class MainWindow(QMainWindow):
                         
         # 範囲内にクランプして列幅を適用
         hdr = self.details_table.horizontalHeader()
-        for col in range(3):
+        for col in range(4):
             width = min(max_widths[col], max(min_widths[col], col_widths[col]))
             self.details_table.setColumnWidth(col, width)
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             
         # パス列は Stretch
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
 
     def on_table_current_item_changed(self, current, previous) -> None:
         """
@@ -1561,17 +1576,53 @@ class MainWindow(QMainWindow):
             self._thumb_cache = ThumbnailCache(settings)
             self.thumbnail_grid.set_cache(self._thumb_cache)
 
-            # サイズ警告チェック（起動時）
-            size_mb = self._thumb_cache.get_size_mb()
-            warn_mb = int(settings.value("cache/warn_size_mb", 1024))
-            if size_mb >= warn_mb:
+            self._refresh_cache_scope()
+
+            # サイズ警告チェック（起動時）。セッション35: 従来の固定1GBではなく
+            # サイズ上限（cache/max_size_mb）の95%以上で警告する。
+            if self._thumb_cache.is_near_limit():
+                size_mb = self._thumb_cache.get_size_mb()
                 self.status_bar.showMessage(
-                    f"キャッシュが {size_mb:.0f} MB を超えています。"
-                    "ツール > キャッシュメンテナンス で清掃できます。",
+                    f"キャッシュが {size_mb:.0f} MB で、上限"
+                    f"（{self._thumb_cache.max_size_mb} MB）に近づいています。"
+                    "終了時に古いものから整理されます"
+                    "（ツール > キャッシュメンテナンスで設定できます）。",
                     8000,
                 )
         except Exception as e:
             print(f"[MainWindow] ThumbnailCache init failed: {e}", flush=True)
+
+    def _refresh_cache_scope(self) -> None:
+        """
+        サムネイルキャッシュの作成範囲判定に使うフォルダ一覧を watched_folders
+        から読み直して供給する（セッション35）。
+          登録フォルダ: watch_mode != 'none'（recursive も渡す）
+          お気に入り  : quick_access = 1（配下のサブフォルダを含む）
+        取得に失敗したら何もしない（直前の範囲情報を維持。キャッシュ側は
+        範囲情報が一度も供給されていなければ全て範囲内として扱う）。
+        """
+        if self._thumb_cache is None:
+            return
+        try:
+            conn = lifecycle_manager.get_connection()
+            try:
+                rows = conn.execute(
+                    "SELECT path, recursive, watch_mode, quick_access "
+                    "FROM watched_folders"
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[MainWindow] cache scope refresh failed: {e}", flush=True)
+            return
+        registered = [(r[0], bool(r[1])) for r in rows if r[2] and r[2] != "none"]
+        favorites = [r[0] for r in rows if r[3]]
+        self._thumb_cache.set_scope_roots(registered, favorites)
+
+    def _on_about(self) -> None:
+        """ヘルプ > D-liner について（バージョン情報つき）"""
+        from version_info import show_about_dialog
+        show_about_dialog(self, "v1.0")
 
     def _on_cache_maintenance(self) -> None:
         """ツール > キャッシュメンテナンス ダイアログ"""
@@ -1598,6 +1649,52 @@ class MainWindow(QMainWindow):
                            QLabel(f"{size_mb:.1f} MB  /  {count:,} 件"))
         info_layout.addRow("保存先:", QLabel(loc))
         outer.addLayout(info_layout)
+        outer.addSpacing(8)
+
+        # --- 設定（セッション35）: サイズ上限・整理目標・作成範囲 ---
+        # 整理はアプリ終了時に行われる。値はマシンスペック・ディスク容量に応じて
+        # 調整できる。範囲は上限50MB以上、整理目標50〜90%（ユーザー指定）。
+        from PyQt6.QtWidgets import QSpinBox, QComboBox
+        from thumbnail_cache import (
+            MIN_MAX_SIZE_MB, MIN_TRIM_PERCENT, MAX_TRIM_PERCENT,
+            SCOPE_REGISTERED, SCOPE_REGISTERED_FAV,
+        )
+        cache_ok = self._thumb_cache is not None
+        spin_max = QSpinBox()
+        spin_max.setRange(MIN_MAX_SIZE_MB, 102400)
+        spin_max.setSuffix(" MB")
+        spin_max.setValue(self._thumb_cache.max_size_mb if cache_ok else 200)
+        spin_max.setToolTip(
+            "キャッシュのサイズ上限。超えている場合、アプリ終了時に"
+            "古いもの（最終アクセス順）から整理されます。")
+        spin_pct = QSpinBox()
+        spin_pct.setRange(MIN_TRIM_PERCENT, MAX_TRIM_PERCENT)
+        spin_pct.setSuffix(" %")
+        spin_pct.setValue(self._thumb_cache.trim_percent if cache_ok else 80)
+        spin_pct.setToolTip("上限を超えたとき、上限のこの割合まで削減します。")
+        combo_scope = QComboBox()
+        combo_scope.addItem("DB登録フォルダのみ", SCOPE_REGISTERED)
+        combo_scope.addItem("DB登録フォルダ＋お気に入り（配下を含む）", SCOPE_REGISTERED_FAV)
+        if cache_ok:
+            _i = combo_scope.findData(self._thumb_cache.scope)
+            combo_scope.setCurrentIndex(max(0, _i))
+        combo_scope.setToolTip(
+            "キャッシュを新規に保存するフォルダの範囲。範囲外のフォルダは"
+            "保存されず、表示のたびにデコードされます（保存済みの分は使われます）。")
+        for _w in (spin_max, spin_pct, combo_scope):
+            _w.setEnabled(cache_ok)
+
+        set_layout = QFormLayout()
+        set_layout.addRow("サイズ上限:", spin_max)
+        set_layout.addRow("整理後の目標:", spin_pct)
+        set_layout.addRow("作成範囲:", combo_scope)
+        outer.addLayout(set_layout)
+        btn_save = QPushButton("設定を保存")
+        btn_save.setEnabled(cache_ok)
+        _save_row = QHBoxLayout()
+        _save_row.addWidget(btn_save)
+        _save_row.addStretch()
+        outer.addLayout(_save_row)
         outer.addSpacing(8)
 
         # ボタン行
@@ -1649,8 +1746,23 @@ class MainWindow(QMainWindow):
             self.thumbnail_grid.cache.clear()
             result_label.setText("全削除完了。")
 
+        def do_save_settings():
+            _st = QSettings("D-liner", "D-liner")
+            _st.setValue("cache/max_size_mb", spin_max.value())
+            _st.setValue("cache/trim_percent", spin_pct.value())
+            _st.setValue("cache/scope", combo_scope.currentData())
+            _st.sync()
+            self._thumb_cache.reload_settings()
+            self._refresh_cache_scope()
+            result_label.setText(
+                f"設定を保存しました: 上限 {spin_max.value()} MB / "
+                f"整理目標 {spin_pct.value()}% / {combo_scope.currentText()}"
+                "（整理はアプリ終了時に実行されます）"
+            )
+
         btn_clean.clicked.connect(do_clean)
         btn_all.clicked.connect(do_delete_all)
+        btn_save.clicked.connect(do_save_settings)
 
         dlg.exec()
 
@@ -1751,7 +1863,7 @@ class MainWindow(QMainWindow):
             return
 
         image_id = None
-        for img_id, p, _, _, _ in self.search_results:
+        for img_id, p, _, _, _, _ in self.search_results:
             if p == path and img_id >= 0:
                 image_id = img_id
                 break
@@ -1772,7 +1884,7 @@ class MainWindow(QMainWindow):
 
         targets = [
             (img_id, path)
-            for img_id, path, _, _, _ in self.search_results
+            for img_id, path, _, _, _, _ in self.search_results
             if img_id >= 0
         ]
         if not targets:
@@ -2194,13 +2306,18 @@ class MainWindow(QMainWindow):
 
         dest_dir = dlg.destination_dir()
         caption_mode = dlg.caption_mode()
+        use_underscore = dlg.use_underscore()
         if not dest_dir:
             return
 
-        self._start_lora_export(targets, dest_dir, caption_mode)
+        self._start_lora_export(targets, dest_dir, caption_mode, use_underscore)
 
     def _start_lora_export(
-        self, targets: list[tuple[int, str]], dest_dir: str, caption_mode: str
+        self,
+        targets: list[tuple[int, str]],
+        dest_dir: str,
+        caption_mode: str,
+        use_underscore: bool = True,
     ) -> None:
         """LoraExportWorker を起動してプログレスダイアログを表示する。"""
         from PyQt6.QtWidgets import QProgressDialog
@@ -2215,7 +2332,8 @@ class MainWindow(QMainWindow):
         self._lora_export_progress_dlg.setValue(0)
 
         self._lora_export_worker = LoraExportWorker(
-            targets=targets, dest_dir=dest_dir, caption_mode=caption_mode, parent=self
+            targets=targets, dest_dir=dest_dir, caption_mode=caption_mode,
+            use_underscore=use_underscore, parent=self
         )
         self._lora_export_progress_dlg.canceled.connect(
             self._lora_export_worker.requestInterruption
@@ -2735,7 +2853,12 @@ class MainWindow(QMainWindow):
         # BackgroundThumbWorker側のDBフェッチが空振り（queue_empty）に
         # なるだけで済ませる（デコード無し・仕様として据え置き）。
         paths = None
-        if not self.folder_is_registered and self._is_quick_access_folder(self.current_folder_path):
+        if (not self.folder_is_registered
+                and self._thumb_cache.scope_includes_favorites()
+                and self._is_quick_access_folder(self.current_folder_path)):
+            # セッション35: キャッシュ作成範囲が「DB登録フォルダのみ」（既定）の
+            # 場合、お気に入りのみのフォルダは永続化されないため、先読みしても
+            # 捨てるだけになる。範囲にお気に入りを含める設定のときだけ先読みする。
             paths = [r[1] for r in self.search_results] if self.search_results else None
 
         self._bg_thumb_worker = BackgroundThumbWorker(
@@ -2778,8 +2901,17 @@ class MainWindow(QMainWindow):
             f"待機中（前回+{generated}）" if show_count else "待機中",
         )
         if show_count:
-            # グリッドを再描画してキャッシュヒットさせる
-            self.trigger_search()
+            # バグ修正（セッション35、実機報告）: 以前は選択の有無に関わらず
+            # trigger_search()で完全再検索していたが、非選択時（ホイール
+            # 操作のみ等）はselected_item_pathが空のため set_images() 側の
+            # 復元対象が無く、スクロール位置が強制的に先頭へ巻き戻って
+            # いた。選択がある場合のみ従来通りtrigger_search()（選択・
+            # スクロール位置は set_images() 側の復元ロジックで保たれる）を
+            # 使い、非選択時はスクロール位置に触れない軽量パスへ切り替える。
+            if self.thumbnail_grid.selected_item_path:
+                self.trigger_search()
+            else:
+                self.thumbnail_grid.refresh_visible_thumbnails_from_cache()
         print(f"[BGThumb] 完了: generated={generated} skipped={skipped}"
               f"{' (旧フォルダ分・表示更新スキップ)' if is_stale else ''}", flush=True)
         # バグ修正: is_staleでない（＝今の現在フォルダに対する完了）場合、
@@ -3373,7 +3505,7 @@ if __name__ == "__main__":
         import ctypes as _ctypes
         try:
             _ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "dliner.app.0.9"
+                "dliner.app.1.0"
             )
         except Exception:
             pass  # 失敗してもアイコン表示以外への影響は無いため無視する

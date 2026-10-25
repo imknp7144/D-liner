@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QRadioButton,
+    QCheckBox,
     QListWidget,
     QListWidgetItem,
     QFileDialog,
@@ -36,10 +37,15 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from file_operation_dialog import get_quick_access_folders
+from file_operation_dialog import get_quick_access_folders, _load_history, _push_history
 
 # Windows のファイル/フォルダ名として使えない文字
 _INVALID_NAME_CHARS = '<>:"/\\|?*'
+
+# バグ修正（セッション35、実機報告）: 親フォルダの選択履歴が一切保存
+# されておらず、毎回フルパス入力を強いられていた。file_operation_dialog.py
+# の履歴機構（QSettings + JSON文字列化、直近10件）をそのまま再利用する。
+_HISTORY_KEY_LORA_PARENT = "loraexport/history_parent"
 
 
 class LoraExportDialog(QDialog):
@@ -84,6 +90,9 @@ class LoraExportDialog(QDialog):
         parent_row = QHBoxLayout()
         self.parent_combo = QComboBox(self)
         self.parent_combo.setEditable(True)
+        for h in _load_history(_HISTORY_KEY_LORA_PARENT):
+            self.parent_combo.addItem(h)
+        self.parent_combo.setCurrentText("")
         parent_row.addWidget(self.parent_combo, stretch=1)
         browse_btn = QPushButton("...", self)
         browse_btn.setFixedWidth(32)
@@ -104,6 +113,18 @@ class LoraExportDialog(QDialog):
         self.mode_manual_radio = QRadioButton("マニュアルタグのみ", self)
         left.addWidget(self.mode_all_radio)
         left.addWidget(self.mode_manual_radio)
+
+        left.addSpacing(8)
+        self.underscore_checkbox = QCheckBox(
+            "タグのアンダースコアをスペースに置換（anima系向け）", self
+        )
+        self.underscore_checkbox.setChecked(True)
+        self.underscore_checkbox.setToolTip(
+            "SDXL系のDanbooruタグはアンダースコア付きが基本表記、anima系は\n"
+            "スペース区切りが基本表記のため、出力先に合わせて切り替える。\n"
+            "score_9 等のスコア条件タグはこの設定に関わらずアンダースコアを維持します。"
+        )
+        left.addWidget(self.underscore_checkbox)
 
         left.addStretch(1)
 
@@ -183,6 +204,12 @@ class LoraExportDialog(QDialog):
             return
 
         self._dest_dir = dest_dir
+
+        # 履歴更新（重複除去して先頭に追加、最大件数で切り詰め）。
+        # dest_dir（新規フォルダ名込み）ではなく、再利用価値のある
+        # parent_dir（親フォルダ）側を履歴として保存する。
+        _push_history(_HISTORY_KEY_LORA_PARENT, parent_dir)
+
         self.accept()
 
     def destination_dir(self) -> str | None:
@@ -190,3 +217,7 @@ class LoraExportDialog(QDialog):
 
     def caption_mode(self) -> str:
         return "all" if self.mode_all_radio.isChecked() else "manual_only"
+
+    def use_underscore(self) -> bool:
+        """True: アンダースコア付きのまま(SDXL系) / False: スペース置換(anima系)"""
+        return not self.underscore_checkbox.isChecked()

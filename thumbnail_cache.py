@@ -10,7 +10,14 @@ SQLite ベースのサムネイルキャッシュ。linar.db とは別ファイ�
   - put() はバックグラウンドスレッドで実行（UI をブロックしない）
   - セッション中のアクセスをインメモリで記録し、close() で一括 UPDATE
   - 7 日間隔で 30 日未アクセスエントリを自動削除 + VACUUM
-  - 起動時 integrity_check 失敗 → DB 削除して再作成（linar.db に影響なし）
+  - 終了時にサイズ上限（cache/max_size_mb）を超えていれば、last_accessed の
+    古い順に上限の cache/trim_percent % まで削除 + VACUUM（セッション35）
+  - 作成範囲の制限（cache/scope、セッション35）: 既定は「DB登録フォルダのみ」。
+    範囲外フォルダのサムネイルは永続化しない（既存エントリの読み出しは可）
+  - 起動時は DB を開けるか（ヘッダ・スキーマ）だけを確認する。従来の
+    PRAGMA integrity_check（DB全体を走査するためサイズに比例して起動が
+    遅くなる）はセッション35で廃止。内容の破損は実行中の読み書きで
+    検出し、終了時に DB を削除して次回起動で再作成する（linar.db に影響なし）
 
 スレッド設計（根治的修正）:
   従来は sqlite3.Connection を1個だけ生成し、check_same_thread=False +
@@ -29,7 +36,13 @@ QSettings キー（いずれも D-liner/D-liner 名前空間）:
                                 デフォルト: {アプリ配置フォルダ}/cache/
     cache/retention_days        未アクセスエントリの保持日数（デフォルト 30）
     cache/auto_clean_interval_days  自動清掃の実行間隔（デフォルト 7）
-    cache/warn_size_mb          警告閾値 MB（デフォルト 1024）
+    cache/max_size_mb           サイズ上限 MB（デフォルト 200、下限 50）
+    cache/trim_percent          上限超過時の整理目標（上限の何%まで削るか。
+                                デフォルト 80、範囲 50〜90）
+    cache/scope                 "registered"（DB登録フォルダのみ・既定）/
+                                "registered_and_favorites"（お気に入り
+                                = quick_access 配下を含む）
+    ※ cache/warn_size_mb はセッション35で廃止（警告は上限の95%以上で表示）
 """
 
 from __future__ import annotations
@@ -37,6 +50,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -68,6 +82,27 @@ def _dbg(msg: str) -> None:
 _DB_FILENAME  = "thumbnail_cache.db"
 _JPEG_QUALITY = 82   # 80〜85 の中間値
 _BUSY_TIMEOUT_MS = 8000  # 他スレッド/コネクションが書き込み中の場合の自動リトライ上限
+
+# サイズ上限・整理目標の設定値の範囲（セッション35、ユーザー指定。不便があれば再設計）
+DEFAULT_MAX_SIZE_MB   = 200
+MIN_MAX_SIZE_MB       = 50
+DEFAULT_TRIM_PERCENT  = 80
+MIN_TRIM_PERCENT      = 50
+MAX_TRIM_PERCENT      = 90
+SCOPE_REGISTERED      = "registered"
+SCOPE_REGISTERED_FAV  = "registered_and_favorites"
+WARN_RATIO            = 0.95   # 上限のこの割合以上で起動時に警告
+
+
+def _norm_for_scope(path: str) -> str:
+    """範囲判定用の正規化（区切りを / に統一・末尾 / 除去・大文字小文字無視）。"""
+    return path.replace("\\", "/").rstrip("/").lower()
+
+
+def _is_corruption_error(e: Exception) -> bool:
+    """DB 内容の破損を示すエラーか（ロック等の一時的エラーを誤判定しない）。"""
+    msg = str(e).lower()
+    return any(k in msg for k in ("not a database", "malformed", "corrupt"))
 
 
 class ThumbnailCache:
@@ -108,7 +143,15 @@ class ThumbnailCache:
         # 設定値を読み込む
         self._retention_days = int(self._cfg("cache/retention_days",            30))
         self._clean_interval = int(self._cfg("cache/auto_clean_interval_days",   7))
-        self._warn_size_mb   = int(self._cfg("cache/warn_size_mb",            1024))
+        self._load_limits()
+
+        # 作成範囲の判定用（main_window が set_scope_roots() で供給する）。
+        # None の間は全パスを範囲内とみなす（供給前・取得失敗時に黙って
+        # キャッシュしなくなる事態を避けるフェイルオープン）。
+        self._scope_registered: list[tuple[str, bool]] | None = None
+        self._scope_favorites: list[str] = []
+        # 実行中に DB 内容の破損を検出したら終了時に DB を削除する
+        self._corrupt_suspected = False
 
         cache_dir_str = self._cfg("cache/dir", "")
         self._cache_dir = (
@@ -159,6 +202,7 @@ class ThumbnailCache:
             ).fetchone()
         except Exception as e:
             _dbg(f"get() miss: SELECT raised for {path}: {e}")
+            self._note_error(e)
             return None
 
         if row is None:
@@ -205,8 +249,84 @@ class ThumbnailCache:
             _dbg(f"put() skipped: db not ready (path={path})")
             return
         path = Path(path).as_posix()   # パス正規化（\ → /）
+        if not self.is_in_scope(path):
+            _dbg(f"put() skipped: out of scope (path={path})")
+            return
         _dbg(f"put() queued: {path} (thumb_size={thumb_size})")
         self._executor.submit(self._put_bg, path, thumb_size, qimage)
+
+    # ------------------------------------------------------------------
+    # 設定・作成範囲（セッション35）
+    # ------------------------------------------------------------------
+
+    def _load_limits(self) -> None:
+        """QSettings からサイズ上限・整理目標・作成範囲を（範囲補正つきで）読む。"""
+        try:
+            mx = int(float(self._cfg("cache/max_size_mb", DEFAULT_MAX_SIZE_MB)))
+        except (TypeError, ValueError):
+            mx = DEFAULT_MAX_SIZE_MB
+        try:
+            pct = int(float(self._cfg("cache/trim_percent", DEFAULT_TRIM_PERCENT)))
+        except (TypeError, ValueError):
+            pct = DEFAULT_TRIM_PERCENT
+        scope = str(self._cfg("cache/scope", SCOPE_REGISTERED))
+        if scope not in (SCOPE_REGISTERED, SCOPE_REGISTERED_FAV):
+            scope = SCOPE_REGISTERED
+        self._max_size_mb = max(MIN_MAX_SIZE_MB, mx)
+        self._trim_percent = max(MIN_TRIM_PERCENT, min(MAX_TRIM_PERCENT, pct))
+        self._scope = scope
+
+    def reload_settings(self) -> None:
+        """設定ダイアログで保存した直後など、QSettings を読み直す。"""
+        self._load_limits()
+
+    @property
+    def max_size_mb(self) -> int:
+        return self._max_size_mb
+
+    @property
+    def trim_percent(self) -> int:
+        return self._trim_percent
+
+    @property
+    def scope(self) -> str:
+        return self._scope
+
+    def scope_includes_favorites(self) -> bool:
+        return self._scope == SCOPE_REGISTERED_FAV
+
+    def set_scope_roots(self, registered: list[tuple[str, bool]],
+                        favorites: list[str]) -> None:
+        """
+        作成範囲の判定に使うフォルダ一覧を更新する。
+
+        registered: (フォルダパス, recursive) — watch_mode != 'none' のもの。
+                    recursive=False は直下のファイルのみ範囲内。
+        favorites : お気に入り（quick_access=1）。配下のサブフォルダも含む。
+        """
+        reg = [(_norm_for_scope(p), bool(r)) for p, r in registered if p]
+        fav = [_norm_for_scope(p) for p in favorites if p]
+        self._scope_registered = reg
+        self._scope_favorites = fav
+
+    def is_in_scope(self, path: str) -> bool:
+        """このパスのサムネイルを永続化してよいか。"""
+        if self._scope_registered is None:
+            return True   # フェイルオープン（範囲情報の供給前）
+        p = _norm_for_scope(path)
+        for root, recursive in self._scope_registered:
+            if p.startswith(root + "/"):
+                if recursive or "/" not in p[len(root) + 1:]:
+                    return True
+        if self._scope == SCOPE_REGISTERED_FAV:
+            for root in self._scope_favorites:
+                if p.startswith(root + "/"):
+                    return True
+        return False
+
+    def is_near_limit(self) -> bool:
+        """起動時警告用: ファイルサイズが上限の WARN_RATIO 以上か。"""
+        return self.get_size_mb() >= self._max_size_mb * WARN_RATIO
 
     def get_size_mb(self) -> float:
         """キャッシュ DB のファイルサイズを MB で返す。"""
@@ -307,6 +427,17 @@ class ThumbnailCache:
         except Exception:
             pass
 
+        # 1.5 実行中に DB 内容の破損を検出していた場合は、整理等をせず
+        #     全コネクションを閉じて DB ファイルを削除する（次回起動で再作成）。
+        #     起動時の integrity_check 廃止（セッション35）に伴う代替手段。
+        if self._corrupt_suspected:
+            print("[ThumbnailCache] DB corruption detected. Removing DB; "
+                  "it will be recreated on next start.", flush=True)
+            self._close_all_conns()
+            self._remove_db_files()
+            self._db_ready = False
+            return
+
         try:
             conn = self._get_conn()
         except Exception as e:
@@ -328,12 +459,24 @@ class ThumbnailCache:
             except Exception as e:
                 print(f"[ThumbnailCache] last_accessed update failed: {e}", flush=True)
 
-        # 3. 自動清掃（間隔チェック）
+        # 3. 整理（セッション35）
+        #    a) 期間による自動清掃（間隔チェックあり）。VACUUM は b) とまとめて
+        #       1回だけ行うため、ここでは行わない。
+        #    b) サイズ上限超過時の整理（毎回の終了時にチェック）。
+        age_deleted = 0
         if self._should_clean():
-            self._do_clean()
+            age_deleted = self._do_clean(vacuum=False)
             self._set_meta("last_cleaned_at", now_str)
+        vacuumed = self._trim_by_size()
+        if age_deleted > 0 and not vacuumed:
+            self._vacuum()
 
         # 4. このプロセスが把握している全コネクションを閉じる
+        self._close_all_conns()
+        self._db_ready = False
+
+    def _close_all_conns(self) -> None:
+        """このプロセスが把握している全スレッドぶんのコネクションを閉じる。"""
         with self._conns_lock:
             conns = list(self._all_conns)
             self._all_conns.clear()
@@ -343,7 +486,106 @@ class ThumbnailCache:
             except Exception as e:
                 _dbg(f"close(): foreign-thread connection could not be closed "
                      f"(owning thread already exited): {e}")
-        self._db_ready = False
+        self._local.conn = None
+
+    def _remove_db_files(self) -> None:
+        """DB 本体と WAL/SHM ファイルを削除する（破損時の再作成用）。"""
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                Path(str(self._db_path) + suffix).unlink(missing_ok=True)
+            except Exception as e:
+                print(f"[ThumbnailCache] could not remove {self._db_path.name}"
+                      f"{suffix}: {e}", flush=True)
+
+    def _note_error(self, e: Exception) -> None:
+        """DB 内容の破損を示すエラーなら、終了時に DB を削除するフラグを立てる。"""
+        if isinstance(e, sqlite3.DatabaseError) and _is_corruption_error(e):
+            if not self._corrupt_suspected:
+                print(f"[ThumbnailCache] corruption suspected: {e}", flush=True)
+            self._corrupt_suspected = True
+
+    def _vacuum(self) -> None:
+        t0 = time.perf_counter()
+        try:
+            conn = self._get_conn()
+            conn.execute("VACUUM")
+            # WAL モードでは VACUUM の結果がメインファイルへ反映されるのは
+            # チェックポイント時。ここで反映・切り詰めして、ファイルサイズが
+            # 実際に縮んだ状態にする（ログ・次回起動時のサイズ警告の正確さのため）
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            print(f"[ThumbnailCache] VACUUM: {(time.perf_counter() - t0) * 1000:.0f} ms",
+                  flush=True)
+        except Exception as e:
+            print(f"[ThumbnailCache] VACUUM failed: {e}", flush=True)
+
+    def _trim_by_size(self) -> bool:
+        """
+        サイズ上限（max_size_mb）を超えていれば、last_accessed の古い順に
+        削除して「上限 × trim_percent %」まで縮め、VACUUM する。
+        終了時（close()）専用。VACUUM を実行したら True を返す。
+        """
+        cap_bytes = self._max_size_mb * 1024 * 1024
+        target_bytes = int(cap_bytes * self._trim_percent / 100)
+        try:
+            conn = self._get_conn()
+            # WAL 内の未反映分をメインファイルへ書き戻してから大きさを測る
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            size = self._db_path.stat().st_size
+        except Exception as e:
+            print(f"[ThumbnailCache] size trim: could not measure: {e}", flush=True)
+            return False
+        if size <= cap_bytes:
+            return False
+
+        t0 = time.perf_counter()
+        try:
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            free_pages = conn.execute("PRAGMA freelist_count").fetchone()[0]
+            used = size - free_pages * page_size     # 実データ分
+            need = used - target_bytes               # 削るべき量
+            removed = 0
+            if need > 0:
+                to_delete: list[int] = []
+                freed = 0
+                cur = conn.execute(
+                    "SELECT rowid, length(thumb) FROM thumb_cache "
+                    "ORDER BY last_accessed ASC, rowid ASC"
+                )
+                try:
+                    for rowid, blen in cur:
+                        to_delete.append(rowid)
+                        freed += (blen or 0)
+                        if freed >= need:
+                            break
+                finally:
+                    cur.close()   # 未完了の SELECT が残ると VACUUM が失敗する
+                CHUNK = 500
+                for i in range(0, len(to_delete), CHUNK):
+                    chunk = to_delete[i:i + CHUNK]
+                    conn.execute(
+                        f"DELETE FROM thumb_cache WHERE rowid IN "
+                        f"({','.join('?' for _ in chunk)})", chunk
+                    )
+                conn.commit()
+                removed = len(to_delete)
+        except Exception as e:
+            print(f"[ThumbnailCache] size trim failed: {e}", flush=True)
+            self._note_error(e)
+            return False
+
+        self._vacuum()
+        try:
+            new_size = self._db_path.stat().st_size
+        except OSError:
+            new_size = 0
+        print(
+            f"[ThumbnailCache] Size trim: removed {removed} entries, "
+            f"{size / 1048576:.1f} MB -> {new_size / 1048576:.1f} MB "
+            f"(cap {self._max_size_mb} MB, target {self._trim_percent}%, "
+            f"{(time.perf_counter() - t0) * 1000:.0f} ms total)",
+            flush=True,
+        )
+        return True
 
     def release_thread_connection(self) -> None:
         """
@@ -377,40 +619,47 @@ class ThumbnailCache:
 
     def _bootstrap(self) -> None:
         """
-        起動時に1回だけ実行: キャッシュディレクトリ作成、integrity_check、
-        破損していれば削除。実際の接続はスレッドごとに _get_conn() が
-        遅延生成する。
+        起動時に1回だけ実行: キャッシュディレクトリ作成と、DB を開けるかの確認。
+
+        セッション35: 従来ここで行っていた PRAGMA integrity_check（DB全体を
+        走査するためキャッシュサイズに比例して起動が遅くなる。実機でおよそ
+        50MBあたり1秒）と SELECT COUNT(*)（ログ用のみ）を廃止した。
+        代わりに _get_conn()（WAL 設定・スキーマ作成）が成功するかだけを確認する。
+        "not a database" 等のヘッダ破損はここで検出して DB を削除・再作成する。
+        ファイル内部の破損は実行中の読み書きで検出し（_note_error）、終了時に
+        DB を削除して次回起動で再作成する。
+        ロック・権限などの一時的エラーでは DB を削除しない（有効なDBを誤って
+        消さないため、メッセージに破損を示す語がある場合のみ削除する）。
         """
+        t0 = time.perf_counter()
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         _dbg(f"_bootstrap(): resolved db_path={self._db_path.resolve()}")
 
-        if self._db_path.exists():
+        ready = False
+        for attempt in (1, 2):
             try:
-                check_conn = sqlite3.connect(str(self._db_path))
-                result = check_conn.execute("PRAGMA integrity_check").fetchone()
-                check_conn.close()
-                if not (result and result[0] == "ok"):
-                    _dbg(f"_bootstrap(): integrity_check result={result}")
-                    print("[ThumbnailCache] DB corrupt. Recreating...", flush=True)
-                    self._db_path.unlink(missing_ok=True)
+                self._get_conn()
+                ready = True
+                break
+            except sqlite3.DatabaseError as e:
+                if (attempt == 1 and self._db_path.exists()
+                        and _is_corruption_error(e)):
+                    print(f"[ThumbnailCache] DB corrupt ({e}). Recreating...",
+                          flush=True)
+                    self._close_all_conns()
+                    self._remove_db_files()
+                    continue
+                print(f"[ThumbnailCache] Failed to open DB: {e}", flush=True)
+                break
             except Exception as e:
-                _dbg(f"_bootstrap(): integrity check raised: {e}")
-                print("[ThumbnailCache] DB corrupt. Recreating...", flush=True)
-                try:
-                    self._db_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                print(f"[ThumbnailCache] Failed to open DB: {e}", flush=True)
+                break
 
-        # メインスレッド用の最初のコネクションをここで生成し、スキーマを用意する
-        try:
-            conn = self._get_conn()
-            row = conn.execute("SELECT COUNT(*) FROM thumb_cache").fetchone()
-            _dbg(f"_bootstrap(): ready ({row[0] if row else '?'} entries)")
-            print(f"[ThumbnailCache] DB ready: {self._db_path}", flush=True)
-            self._db_ready = True
-        except Exception as e:
-            print(f"[ThumbnailCache] Failed to open DB: {e}", flush=True)
-            self._db_ready = False
+        self._db_ready = ready
+        if ready:
+            print(f"[ThumbnailCache] DB ready: {self._db_path} "
+                  f"(bootstrap {(time.perf_counter() - t0) * 1000:.0f} ms)",
+                  flush=True)
 
     def _get_conn(self) -> sqlite3.Connection:
         """
@@ -431,10 +680,19 @@ class ThumbnailCache:
             return conn
 
         conn = sqlite3.connect(str(self._db_path), timeout=10.0)
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-        self._ensure_schema(conn)
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+            self._ensure_schema(conn)
+        except Exception:
+            # 初期化に失敗した接続を放置しない（起動時の破損DB再作成で、
+            # 開いたままのファイルハンドルが削除を妨げるのを防ぐ）
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
 
         self._local.conn = conn
         with self._conns_lock:
@@ -472,6 +730,8 @@ class ThumbnailCache:
         path = Path(path).as_posix()   # パス正規化（\ → /）
         if not self._db_ready:
             return
+        if not self.is_in_scope(path):
+            return
         try:
             mtime = os.path.getmtime(path)
             fsize = os.path.getsize(path)
@@ -502,6 +762,7 @@ class ThumbnailCache:
             )
         except Exception as e:
             print(f"[ThumbnailCache] put failed for {path}: {e}", flush=True)
+            self._note_error(e)
 
     def _delete_entry(self, path: str) -> None:
         if not self._db_ready:
@@ -578,7 +839,7 @@ class ThumbnailCache:
         except Exception:
             return True
 
-    def _do_clean(self) -> int:
+    def _do_clean(self, vacuum: bool = True) -> int:
         """retention_days 以上アクセスのないエントリを削除する。削除件数を返す。"""
         if not self._db_ready:
             return 0
@@ -592,7 +853,7 @@ class ThumbnailCache:
             )
             deleted = cur.rowcount
             conn.commit()
-            if deleted > 0:
+            if deleted > 0 and vacuum:
                 conn.execute("VACUUM")
             print(f"[ThumbnailCache] Auto-clean: removed {deleted} entries.", flush=True)
             return deleted

@@ -8,6 +8,10 @@ sdi_window_viewer.py から機械的に分離。
 目的としており、ロジックの変更は一切行っていない（メソッド本文は1文字も
 変えていない）。
 
+※ セッション35: アニメーション再生用に set_animation_frame() と、smart モードで
+   フレーム差し替え時にウィンドウのリサイズ計算を再利用する分岐を追加
+   （上記「移動のみ」はセッション29時点の記述）。
+
 含まれるクラス:
     SDIImageLabel  SDIウインドウ内での画像描画コンポーネント
                    （指定された表示モード・補間モードで拡大縮小や回転・反転等の
@@ -42,6 +46,13 @@ class SDIImageLabel(QLabel):
         
         self.raw_image: QImage | None = None
         self.display_image: QImage | None = None
+
+        # アニメーション再生用（セッション35）。フレーム差し替え時は
+        # ウィンドウのリサイズ計算（_auto_resize_window_if_raw）を毎フレーム
+        # 実行せず、直前の通常描画で確定した結果を再利用する。
+        self._frame_only: bool = False
+        self._last_auto_result = None
+        self._last_auto_dims: tuple[int, int] | None = None
         
         # 内部変形ステート
         self.scale_factor: float = 1.0
@@ -66,6 +77,37 @@ class SDIImageLabel(QLabel):
         self.flip_horizontal = False
         self.flip_vertical = False
         self.apply_transforms()
+
+    def set_animation_frame(self, qimg: QImage) -> None:
+        """
+        アニメーション再生中のフレーム差し替え専用（セッション35）。
+
+        set_raw_image() と異なり、ズーム・回転・反転の状態をリセットしない。
+        また update_view() の smart モードが毎回呼ぶウィンドウのリサイズ計算を
+        省き、通常描画で確定済みの結果を再利用する（毎フレームのリサイズ
+        連鎖を避けるため）。フレームの寸法が直前の通常描画時と変わった場合は
+        再利用せず通常どおり計算する。
+        """
+        if qimg is None or qimg.isNull():
+            return
+        self.raw_image = qimg
+        if self.flip_horizontal or self.flip_vertical or self.rotation_angle != 0:
+            transform = QTransform()
+            if self.flip_horizontal:
+                transform.scale(-1, 1)
+            if self.flip_vertical:
+                transform.scale(1, -1)
+            if self.rotation_angle != 0:
+                transform.rotate(self.rotation_angle)
+            self.display_image = qimg.transformed(
+                transform, Qt.TransformationMode.FastTransformation)
+        else:
+            self.display_image = qimg
+        self._frame_only = True
+        try:
+            self.update_view()
+        finally:
+            self._frame_only = False
 
     def apply_transforms(self) -> None:
         if self.raw_image is None or self.raw_image.isNull():
@@ -199,7 +241,15 @@ class SDIImageLabel(QLabel):
             if self._sdi_window is not None:
                 # ウィンドウリサイズ後は resizeEvent → update_view が再度呼ばれるため
                 # ここでは pixmap のセットだけ行う（サイズは次の update_view で決まる）
-                result = self._sdi_window._auto_resize_window_if_raw(w, h)
+                if (self._frame_only and self._last_auto_result is not None
+                        and self._last_auto_dims == (w, h)):
+                    # アニメーションのフレーム差し替え: 直前に確定した結果を再利用
+                    result = self._last_auto_result
+                else:
+                    result = self._sdi_window._auto_resize_window_if_raw(w, h)
+                    if result is not None:
+                        self._last_auto_result = result
+                        self._last_auto_dims = (w, h)
                 if result is None:
                     # バグ修正: result が None になるのは、再入防止ガード
                     # （resize()→resizeEvent()→update_view() の再帰呼び出し

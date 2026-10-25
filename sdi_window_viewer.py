@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QStatusBar, QMenuBar, QMenu, QMessageBox,
     QFileDialog, QSizePolicy, QPushButton, QFrame, QToolButton,
     QDialog, QLineEdit, QDialogButtonBox, QListWidget, QListWidgetItem,
-    QCompleter
+    QCompleter, QInputDialog,
 )
 
 # バグ修正: 削除確認ダイアログのデザイン・既定ボタンがサムネイルビュー側
@@ -34,6 +34,7 @@ from thumbnail_grid import show_delete_confirm_dialog
 
 # セッション27〜29の分割により追加: タグパネル関連・画像描画クラスは
 # それぞれ専用ファイルへ移動済み（ロジック変更なしの機械的移動）。
+import image_decode as _image_decode
 from tag_panel import TagPanel
 from sdi_image_label import SDIImageLabel
 from meta_viewer_launcher import open_in_meta_viewer, MetaViewerLink
@@ -82,6 +83,12 @@ class SDIWindow(QMainWindow):
         self.linked_mode = False  # 操作連動
         self._first_show_done = False   # show()後の初回再描画フラグ
         self._is_loading = False        # ロード中フラグ（連続ホイール/キー入力の多重ロード防止）
+        # アニメーション再生（セッション35）。ファイルをメモリに読み込んで
+        # QBuffer 経由で QMovie に渡す（再生中の画像をリネーム・移動・削除
+        # できるよう、Windows でのファイルロックを避けるため）。
+        self._anim_movie = None
+        self._anim_buffer = None
+        self._anim_data = None
         self._meta_viewer_link = MetaViewerLink(self)  # 開いたMeta Viewerとの同期リンク
         self.init_ui()
 
@@ -283,6 +290,11 @@ class SDIWindow(QMainWindow):
         del_action.setShortcut("Delete")
         del_action.triggered.connect(self.file_delete)
         file_menu.addAction(del_action)
+
+        rename_action = QAction("名前の変更(&R)...", self)
+        rename_action.setShortcut("F2")
+        rename_action.triggered.connect(self.file_rename)
+        file_menu.addAction(rename_action)
 
         file_menu.addSeparator()
 
@@ -747,12 +759,16 @@ class SDIWindow(QMainWindow):
         self._is_loading = True
         success = False
         try:
+            self._stop_animation()   # 前の画像のアニメーションを止める
             self.file_path = path.replace("\\", "/")
             if not os.path.exists(self.file_path):
                 self.status_bar.showMessage("ファイルが存在しません。")
                 return False
 
             qimg = QImage(self.file_path)
+            if qimg.isNull() and _image_decode.needs_pillow(self.file_path):
+                # セッション35: Qt が読めない形式（avif）は Pillow 経由で読む
+                qimg, _pw, _ph = _image_decode.read_via_pillow(self.file_path)
             if qimg.isNull():
                 self.status_bar.showMessage("画像のロードに失敗しました。")
                 return False
@@ -790,10 +806,84 @@ class SDIWindow(QMainWindow):
             # 何もしないので、常に呼んで問題ない。
             self._meta_viewer_link.push(self.file_path)
 
+            # GIF / アニメーションWebP は、通常どおり最初のフレームを表示
+            # し終えたあとで再生を開始する（セッション35）
+            self._start_animation(self.file_path)
+
             success = True
             return True
         finally:
             self._is_loading = False
+
+    # ------------------------------------------------------------------
+    # アニメーション再生（GIF / アニメーションWebP、セッション35）
+    # ------------------------------------------------------------------
+
+    # これを超えるファイルはメモリへ読み込まず、静止画（最初のフレーム）のまま
+    _ANIM_MAX_BYTES = 256 * 1024 * 1024
+
+    def _start_animation(self, path: str) -> None:
+        """アニメーション画像なら QMovie で再生を開始する。静止画は何もしない。"""
+        try:
+            if not _image_decode.is_animated_file(path):
+                return
+            if os.path.getsize(path) > self._ANIM_MAX_BYTES:
+                return
+            from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+            from PyQt6.QtGui import QMovie
+            with open(path, "rb") as f:
+                data = QByteArray(f.read())
+            buf = QBuffer(data)
+            buf.open(QIODevice.OpenModeFlag.ReadOnly)
+            # QBuffer 経由では形式の自動判別ができない（isValid() が False に
+            # なる）ため、拡張子から形式名を明示する
+            fmt = QByteArray(os.path.splitext(path)[1].lstrip(".").lower().encode("ascii"))
+            movie = QMovie(buf, fmt)
+            if not movie.isValid():
+                buf.close()
+                print(f"[SDI] animation not playable (static fallback): {path}", flush=True)
+                return
+            movie.setCacheMode(QMovie.CacheMode.CacheNone)
+            movie.frameChanged.connect(self._on_anim_frame)
+            self._anim_data = data
+            self._anim_buffer = buf
+            self._anim_movie = movie
+            movie.start()
+        except Exception as e:
+            print(f"[SDI] animation start failed for {path}: {e}", flush=True)
+            self._stop_animation()
+
+    def _stop_animation(self) -> None:
+        """再生中のアニメーションを止めて資源を解放する（冪等）。"""
+        movie = self._anim_movie
+        self._anim_movie = None
+        if movie is not None:
+            try:
+                movie.frameChanged.disconnect(self._on_anim_frame)
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                movie.stop()
+                movie.deleteLater()
+            except RuntimeError:
+                pass
+        buf = self._anim_buffer
+        self._anim_buffer = None
+        if buf is not None:
+            try:
+                buf.close()
+            except RuntimeError:
+                pass
+        self._anim_data = None
+
+    def _on_anim_frame(self, _index: int) -> None:
+        movie = self._anim_movie
+        if movie is None:
+            return
+        frame = movie.currentImage()
+        if frame.isNull():
+            return
+        self.image_label.set_animation_frame(frame)
 
     def _update_tag_panel(self, file_path: str) -> None:
         """ファイルパスからDBのimage_idを解決してタグパネルを更新する。"""
@@ -1100,6 +1190,21 @@ class SDIWindow(QMainWindow):
         raw_image = self.image_label.raw_image
         if raw_image is None or raw_image.isNull():
             return
+        # バグ修正（セッション35、実機報告）: 「ウインドウサイズへ伸縮」「縦横固定して
+        # 伸縮」モードでは、画像は scroll_area のサイズから計算した pixmap として
+        # 描画される。非同期のタグ取得が完了してタグパネルが高さを持つと、
+        # scroll_area はその分だけ縮むが、ウィンドウ自体のサイズは変わらない
+        # ため resizeEvent が来ず、画像の再計算が行われないまま下部がタグ
+        # パネルの下に隠れていた（最初の1枚目のみ。2枚目以降は前の画像の
+        # タグパネルの高さが既に確保されているため正しく表示される）。
+        # Qt のレイアウト確定は1回のイベントループでは間に合わないことがある
+        # ため、既存の _schedule_deferred_scrollbar_check() と同じく間隔を
+        # 空けて複数回 update_view() し直す（update_view() は pixmap の
+        # 再スケールのみで、ウィンドウのリサイズ計算は行わない）。
+        if self.image_label.fit_mode in ("window", "window_aspect"):
+            for delay_ms in (0, 30, 100, 250):
+                QTimer.singleShot(delay_ms, self.image_label.update_view)
+            return
         self._auto_resize_window_if_raw(raw_image.width(), raw_image.height())
         self._schedule_deferred_scrollbar_check()
 
@@ -1333,6 +1438,69 @@ class SDIWindow(QMainWindow):
                 self.status_bar.showMessage(f"複写完了: {dest_path}")
             except Exception as e:
                 QMessageBox.critical(self, "エラー", f"複写に失敗しました:\n{e}")
+
+    def file_rename(self) -> None:
+        """
+        F2 / メニュー「名前の変更」: 現在表示中の1件をリネームする。
+        thumbnail_grid.py の _rename_file() と同じ「拡張子を除いた部分のみ
+        初期選択」の挙動に合わせる（セッション35、実機報告への対応）。
+
+        削除・移動と異なり、リネーム後は次の画像へ移動せず同じ画像を
+        表示し続ける。full load_image() での再ロードはズーム/リサイズ
+        状態をリセットしてしまう（「そのまま」モードの実寸表示や現在の
+        スクロール位置が失われる）ため使わず、タイトルバー・ステータス
+        バーの文字列のみを軽量に更新する。
+        """
+        old_path = self.file_path
+        old_name = os.path.basename(old_path)
+
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle("名前の変更")
+        dlg.setLabelText("新しいファイル名:")
+        dlg.setTextValue(old_name)
+        line_edit = dlg.findChild(QLineEdit)
+        if line_edit is not None:
+            stem, _ext = os.path.splitext(old_name)
+            QTimer.singleShot(0, lambda: line_edit.setSelection(0, len(stem)))
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        new_name = dlg.textValue()
+
+        if not ok or not new_name.strip() or new_name == old_name:
+            return
+        new_name = new_name.strip()
+        new_path = os.path.join(os.path.dirname(old_path), new_name).replace("\\", "/")
+
+        try:
+            if os.path.exists(new_path):
+                QMessageBox.warning(self, "エラー", f"「{new_name}」は既に存在します。")
+                return
+            os.rename(old_path, new_path)
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"リネームに失敗しました:\n{e}")
+            return
+
+        self.file_path = new_path
+        if old_path in self.all_files:
+            self.all_files[self.all_files.index(old_path)] = new_path
+        self._sync_db_path(old_path, new_path)
+        self._notify_main_window_refresh()
+
+        # 開いているMeta Viewer（meta-onlyモード）があれば新パスへ追従させる
+        self._meta_viewer_link.push(new_path)
+
+        # タイトルバー・ステータスバーのみ軽量更新（load_image()は使わない）
+        raw_image = self.image_label.raw_image
+        if raw_image is not None and not raw_image.isNull():
+            w, h = raw_image.width(), raw_image.height()
+            depth = raw_image.depth()
+            size_mb = os.path.getsize(new_path) / (1024 * 1024)
+            self.setWindowTitle(
+                f"{new_name} {w}x{h} {depth}b {size_mb:.1f}MB "
+                f"({self.current_index + 1}/{len(self.all_files)})"
+            )
+            self.status_bar.showMessage(f"パス: {new_path} | サイズ: {w}x{h} | 深度: {depth}bit")
+        else:
+            self.status_bar.showMessage(f"名前を変更しました: {new_path}")
 
     def file_move(self) -> None:
         from file_operation_dialog import FileOperationDialog
@@ -1648,6 +1816,7 @@ class SDIWindow(QMainWindow):
             settings.setValue("sdi/window_size_w", self.width())
             settings.setValue("sdi/window_size_h", self.height())
 
+        self._stop_animation()
         self.closed.emit(self.file_path)
         self._meta_viewer_link.close()
         super().closeEvent(event)

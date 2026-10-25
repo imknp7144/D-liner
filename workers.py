@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import image_decode as _image_decode
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QObject, QRunnable
 
@@ -73,13 +75,22 @@ def format_tags_for_copy(
     exclude_categories に含まれるカテゴリのタグは除外する。
     use_underscore=False の場合はアンダースコアをスペースに変換する（表示用）。
 
+    例外: "score_" で始まるタグ（score_9, score_8_up 等のPony/Anima系
+    スコア条件タグ）は use_underscore=False でもアンダースコアを維持する
+    （セッション35、ユーザー報告: SDXL系はアンダースコア付きDanbooru表記、
+    anima系はスペース区切りが基本だが、score表記のみアンダースコア付きの
+    まま扱うのが両系統の慣例のため）。
+
     出力順は呼び出し側が渡した tags の順序をそのまま維持する
     （tag_panel.py TagPanel 側で CATEGORY_ORDER 順に並べ替え済みの
     リストを渡す想定のため、ここでは並べ替えを行わない）。
     """
     filtered = [t for t, cat in tags if cat not in exclude_categories]
     if not use_underscore:
-        filtered = [t.replace("_", " ") for t in filtered]
+        filtered = [
+            t if t.lower().startswith("score_") else t.replace("_", " ")
+            for t in filtered
+        ]
     return ", ".join(filtered)
 
 
@@ -114,7 +125,7 @@ class SearchWorker(QThread):
 
     除外トークン: "-" で始まるワードはその条件を NOT で除外する（将来実装）。
     """
-    finished = pyqtSignal(list)  # list[tuple] (id, path, width, height, filesize)
+    finished = pyqtSignal(list)  # list[tuple] (id, path, width, height, filesize, added_at)
     error    = pyqtSignal(str)
 
     def __init__(
@@ -150,7 +161,7 @@ class SearchWorker(QThread):
             cursor = conn.cursor()
 
             sql = """
-                SELECT DISTINCT i.id, i.path, i.width, i.height, i.filesize
+                SELECT DISTINCT i.id, i.path, i.width, i.height, i.filesize, i.added_at
                 FROM images i
             """
             params: list = []
@@ -248,7 +259,7 @@ class SearchWorker(QThread):
                             key=lambda e: e.name.lower(),
                         )
                     folder_entries = [
-                        (-2, e.path.replace("\\", "/"), 0, 0, 0)
+                        (-2, e.path.replace("\\", "/"), 0, 0, 0, "")
                         for e in subdirs
                     ]
                 except OSError:
@@ -337,6 +348,10 @@ class ThumbnailLoadTask(QRunnable):
             if qimg.isNull():
                 # QImageReader失敗時はQImage直接ロードで再試行
                 qimg = QImage(self.path)
+            if qimg.isNull() and _image_decode.needs_pillow(self.path):
+                # セッション35: Qt が読めない形式（avif）は Pillow 経由で読む
+                qimg, _pw, _ph = _image_decode.read_via_pillow(
+                    self.path, (self.target_size, self.target_size))
             if qimg.isNull():
                 raise ValueError(f"読み込み失敗: {reader.errorString()}")
 
@@ -377,6 +392,10 @@ class PreviewWorker(QThread):
                 if scale < 1.0:
                     reader.setScaledSize(orig_size * scale)
             qimg = reader.read()
+            if qimg.isNull() and _image_decode.needs_pillow(self.path):
+                # セッション35: Qt が読めない形式（avif）は Pillow 経由で読む
+                qimg, _pw, _ph = _image_decode.read_via_pillow(
+                    self.path, (self.max_width, self.max_height))
             if qimg.isNull():
                 raise ValueError("プレビュー画像の読み込みに失敗しました")
             self.finished.emit(qimg)
@@ -465,8 +484,11 @@ class FilesystemSearchWorker(QThread):
     """
     DB未登録フォルダ用。OSのファイルシステムを直接読んで画像一覧を返す。
     タグ検索は無視し、ファイル名のみで絞り込む。
-    返す tuple は SearchWorker と同形式: (id, path, width, height, filesize)
+    返す tuple は SearchWorker と同形式: (id, path, width, height, filesize, added_at)
     id は -1（DB未登録のダミー値）。
+    added_at は DB由来ではなく、既存のソート実装（sort_key=="added"時の
+    st_mtime使用）に倣い、ファイルの更新日時(st_mtime)を代用表示する
+    （セッション35、実機報告への対応で新規追加）。
     """
     finished = pyqtSignal(list)
     error    = pyqtSignal(str)
@@ -519,7 +541,7 @@ class FilesystemSearchWorker(QThread):
 
             # フォルダは名前順でソート
             subdirs.sort(key=lambda e: e.name.lower())
-            folder_entries = [(-2, entry.path.replace("\\", "/"), 0, 0, 0) for entry in subdirs]
+            folder_entries = [(-2, entry.path.replace("\\", "/"), 0, 0, 0, "") for entry in subdirs]
 
             # ファイル名フィルタ
             if self.name_filter:
@@ -554,8 +576,17 @@ class FilesystemSearchWorker(QThread):
                 except OSError:
                     return 0
 
+            def _entry_added_at(e) -> str:
+                # DB未登録のためadded_at自体は存在しない。既存のソート実装
+                # （sort_key=="added"時にst_mtimeを使用）と一貫させるため、
+                # 更新日時(st_mtime)をDB側と同じ書式の文字列にして代用表示する。
+                try:
+                    return datetime.fromtimestamp(e.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                except (OSError, ValueError, OverflowError):
+                    return ""
+
             image_entries = [
-                (-1, entry.path.replace("\\", "/"), 0, 0, _entry_filesize(entry))
+                (-1, entry.path.replace("\\", "/"), 0, 0, _entry_filesize(entry), _entry_added_at(entry))
                 for entry in files
             ]
 
@@ -1253,6 +1284,15 @@ class BackgroundThumbWorker(QThread):
                         qimg = reader.read()
                         if qimg.isNull():
                             qimg = QImage(path)
+                        if qimg.isNull() and _image_decode.needs_pillow(path):
+                            # セッション35: Qt が読めない形式（avif）は Pillow
+                            # 経由で読む。解像度も Pillow 側の値で補完キューに
+                            # 積めるようにする（Qt では size() が無効のため
+                            # w=h=0 になっている）。
+                            qimg, _pw, _ph = _image_decode.read_via_pillow(
+                                path, (self._thumb_size, self._thumb_size))
+                            if _pw > 0 and _ph > 0:
+                                w, h = _pw, _ph
                         if qimg.isNull():
                             skipped += 1
                             continue
@@ -1423,6 +1463,12 @@ class LoraExportWorker(QThread):
         "all"         — AI由来タグ + マニュアルタグ（rating/meta除外）
         "manual_only" — マニュアルタグのみ
 
+    use_underscore:
+        True  — Danbooruタグそのまま（アンダースコア付き、SDXL系向け）
+        False — アンダースコアをスペースに置換（anima系向け、ただし
+                score_ で始まるタグは例外的にアンダースコアを維持する。
+                詳細は format_tags_for_copy() のdocstring参照）
+
     ファイル名衝突（複数の元フォルダから同名ファイルが集まるケースを含む）
     は、衝突時のみ "元名_連番.拡張子" 形式のサフィックスを付与して回避する。
     画像側とtxt側は同じ連番で揃える。事前に出力先フォルダの既存ファイルも
@@ -1446,12 +1492,14 @@ class LoraExportWorker(QThread):
         targets: list[tuple[int, str]],   # (image_id, path)
         dest_dir: str,
         caption_mode: str,                # "all" | "manual_only"
+        use_underscore: bool = True,
         parent: "QObject | None" = None,
     ) -> None:
         super().__init__(parent)
         self._targets = list(targets)
         self._dest_dir = dest_dir
         self._caption_mode = caption_mode
+        self._use_underscore = use_underscore
 
     def _fetch_tags_by_image(self, conn: sqlite3.Connection) -> dict[int, list[tuple[str, str]]]:
         """
@@ -1578,7 +1626,10 @@ class LoraExportWorker(QThread):
                 tags = tags_by_image.get(image_id, [])
                 if self._caption_mode == "manual_only":
                     tags = [(t, c) for t, c in tags if c == "manual"]
-                caption_text = format_tags_for_copy(tags, exclude_categories=("rating", "meta"))
+                caption_text = format_tags_for_copy(
+                    tags, exclude_categories=("rating", "meta"),
+                    use_underscore=self._use_underscore,
+                )
                 if not caption_text:
                     empty_captions += 1
 

@@ -104,7 +104,9 @@ DIRECTML_VERSION = "1.24.4"
 COMMON_PACKAGES = [
     "PyQt6>=6.7",
     "numpy>=1.26",
-    "Pillow>=10.0",
+    # v1.0: avif画像の表示（サムネイル・SDI・タグ付け）にPillowの標準AVIF対応が
+    # 必要。Pillow 11.3.0 以降のwheelに同梱されている（それ以前は非対応）。
+    "Pillow>=11.3",
     "psutil",
     "huggingface_hub",
     # ファイル削除をゴミ箱経由にするため（thumbnail_grid.py の
