@@ -100,7 +100,7 @@ _REROUTE_INPUT_NAMES = {"Reroute": "", "ReroutePrimitive|pysssss": "value"}
 COUPLING_TYPES = {"AttentionCouplePPM", "AttentionCouple"}
 TEXT_CONTAINER_TYPES = {
     "CLIPTextEncode", "CLIPTextEncodeBREAK", "TextMultilineSwitchable",
-    "Text Concatenate", "ShowText|pysssss", "Note",
+    "Text Concatenate", "WASLite_TextConcatenate", "ShowText|pysssss", "Note",
 }
 
 
@@ -126,7 +126,7 @@ _CACHE_FIRST_TYPES = {
     # of their own (CLIPTextEncode's widget, TextMultilineSwitchable's own
     # non-external text) are deliberately NOT here -- for those, a fresh
     # edit to the node's own value should win over an older cache.
-    "Text Concatenate", "ConditioningConcat", "Reroute", "ReroutePrimitive|pysssss", "easy setNode", "easy getNode",
+    "Text Concatenate", "WASLite_TextConcatenate", "ConditioningConcat", "Reroute", "ReroutePrimitive|pysssss", "easy setNode", "easy getNode",
 }
 
 
@@ -257,7 +257,7 @@ def _resolve_text_body(graph: Graph, node: Node, visited: set, depth: int) -> Op
             return val
         return None  # bypassed with nothing live feeding it: no value, not a stale one
 
-    if t == "ImpactWildcardEncode":
+    if t in ("ImpactWildcardEncode", "ImpactWildcardProcessor"):
         # widgets_values[0]/[1] (workflow format) are the raw template and
         # "populated_text" (post wildcard/LoRA-tag expansion); in prompt
         # format the same two values arrive as literal "wildcard_text"/
@@ -323,7 +323,7 @@ def _resolve_text_body(graph: Graph, node: Node, visited: set, depth: int) -> Op
             return _resolve_text(graph, val, visited, depth + 1)
         return graph.get_widget(node, 0)
 
-    if t == "Text Concatenate":
+    if t in ("Text Concatenate", "WASLite_TextConcatenate"):
         kind, val = graph.get_input(node, "delimiter")
         delimiter = val if (kind == "literal" and val) else (graph.get_widget(node, 0) or ", ")
         parts = []

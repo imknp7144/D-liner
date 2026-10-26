@@ -36,21 +36,29 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QEvent, pyqtSignal
 from PyQt6.QtGui import QMovie, QPixmap, QFont, QShortcut, QKeySequence
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QScrollArea, QSplitter,
     QVBoxLayout, QHBoxLayout, QFrame, QTextEdit, QSizePolicy, QFileDialog,
-    QToolBar, QCheckBox,
+    QToolBar, QCheckBox, QPushButton,
 )
 
-from .analyze import analyze
+from .analyze import analyze_detailed, SOURCE_DISPLAY_NAMES
 from .comfy_resolve import PromptSection
 
 ANIMATED_SUFFIXES = {".gif", ".webp", ".apng"}
 STATIC_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".avif"}
 SUPPORTED_SUFFIXES = ANIMATED_SUFFIXES | STATIC_SUFFIXES
+
+
+def _toolbar_spacer() -> QWidget:
+    """An expanding, invisible widget used to push subsequent toolbar
+    items (the position indicator) flush right."""
+    spacer = QWidget()
+    spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+    return spacer
 
 # Roughly one color per recurring label so Base/Regional/Negative are
 # distinguishable at a glance without reading the header text every time.
@@ -168,6 +176,17 @@ class SectionPanel(QScrollArea):
         self._layout.setContentsMargins(10, 10, 10, 10)
         self._layout.setSpacing(10)
 
+        # Source/confidence line (review point #12: "what was this
+        # resolved FROM" used to be invisible -- only the final section
+        # text ever reached the UI). Hidden until set_sections() has
+        # something to say; kept as one quiet line rather than a whole
+        # detail panel so it doesn't compete with the actual prompt text.
+        self._source_label = QLabel("")
+        self._source_label.setStyleSheet("color: #6a7a8a; padding: 2px 4px; font-size: 11px;")
+        self._source_label.setWordWrap(True)
+        self._source_label.hide()
+        self._layout.addWidget(self._source_label)
+
         self._notes_toggle = QCheckBox()
         self._notes_toggle.setStyleSheet("QCheckBox { color: #999; padding: 2px 4px; }")
         self._notes_toggle.stateChanged.connect(self._on_toggle_notes)
@@ -181,7 +200,7 @@ class SectionPanel(QScrollArea):
         self._show_notes = bool(state)
         self._render()
 
-    def set_sections(self, sections: list[PromptSection]):
+    def set_sections(self, sections: list[PromptSection], source: str = "", warnings: list[str] | None = None):
         self._all_sections = sections
         non_note = [s for s in sections if s.label != "Note"]
         # Notes default to hidden so they don't clutter a real Positive/
@@ -193,21 +212,38 @@ class SectionPanel(QScrollArea):
         self._notes_toggle.blockSignals(True)
         self._notes_toggle.setChecked(self._show_notes)
         self._notes_toggle.blockSignals(False)
+
+        if source and source != "none":
+            text = f"Source: {SOURCE_DISPLAY_NAMES.get(source, source)}"
+            if warnings:
+                text += "\n" + "\n".join(f"⚠ {w}" for w in warnings)
+            self._source_label.setText(text)
+            self._source_label.show()
+        else:
+            self._source_label.setText("")
+            self._source_label.hide()
+
         self._render()
 
     def _render(self):
-        # Clear existing cards/placeholder -- everything between the
-        # toggle checkbox (index 0) and the trailing stretch (last index).
-        while self._layout.count() > 2:
-            item = self._layout.takeAt(1)
+        # Clear existing cards/placeholder -- everything between the two
+        # fixed header widgets (source label at index 0, toggle checkbox
+        # at index 1) and the trailing stretch (last index).
+        while self._layout.count() > 3:
+            item = self._layout.takeAt(2)
             if item.widget():
                 item.widget().deleteLater()
 
         sections = self._all_sections
         if not sections:
-            placeholder = QLabel("メタデータが見つかりませんでした。")
+            placeholder = QLabel(
+                "メタデータが見つかりませんでした。\n\n"
+                "画像自体は正常に表示されています。\n"
+                "メタデータ解析はPNG/WebP/JPEGのComfyUI・A1111形式に対応しています"
+                "(AVIF/BMPは画像表示のみでメタデータ解析は未対応です)。"
+            )
             placeholder.setStyleSheet("color: #888; padding: 20px;")
-            self._layout.insertWidget(1, placeholder)
+            self._layout.insertWidget(2, placeholder)
             self._notes_toggle.hide()
             return
 
@@ -227,11 +263,11 @@ class SectionPanel(QScrollArea):
             )
             placeholder.setStyleSheet("color: #888; padding: 20px;")
             placeholder.setWordWrap(True)
-            self._layout.insertWidget(1, placeholder)
+            self._layout.insertWidget(2, placeholder)
             return
 
         for i, section in enumerate(visible):
-            self._layout.insertWidget(i + 1, SectionCard(section))
+            self._layout.insertWidget(i + 2, SectionCard(section))
 
 
 class ImagePanel(QScrollArea):
@@ -420,9 +456,25 @@ class ViewerWindow(QMainWindow):
         toolbar = QToolBar()
         toolbar.setMovable(False)
         nav_hint = "← → で前後の画像へ" if meta_only else "ホイールまたは← →で前後の画像へ"
-        open_btn = QLabel(f"  📂 開く (Ctrl+O) ・ 画像をドラッグ&ドロップ ・ {nav_hint}")
-        open_btn.setStyleSheet("color: #ccc; padding: 4px;")
+        open_btn = QPushButton("📂 開く (Ctrl+O)")
+        open_btn.setStyleSheet(
+            "QPushButton { color: #ccc; background-color: #2a2d35; border: 1px solid #444; "
+            "padding: 4px 10px; border-radius: 3px; } "
+            "QPushButton:hover { background-color: #363a44; }"
+        )
+        open_btn.clicked.connect(self._open_dialog)
         toolbar.addWidget(open_btn)
+        hint_label = QLabel(f"  画像/フォルダをドラッグ&ドロップ ・ {nav_hint}")
+        hint_label.setStyleSheet("color: #ccc; padding: 4px;")
+        toolbar.addWidget(hint_label)
+        toolbar.addWidget(_toolbar_spacer())
+        # 現在位置(n/総数)とファイル名。ホイール/矢印キーでの連続切り替え中に
+        # 「今どこにいるか」が分からない、という指摘への対応。ファイルを
+        # 開いた時点・ナビゲーションのたびに _update_position_label() で
+        # 更新する。
+        self._position_label = QLabel("")
+        self._position_label.setStyleSheet("color: #888; padding: 4px 8px;")
+        toolbar.addWidget(self._position_label)
         self.addToolBar(toolbar)
 
         self.section_panel = SectionPanel()
@@ -452,6 +504,16 @@ class ViewerWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Left), self, activated=lambda: self._navigate(-1))
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, activated=lambda: self._navigate(1))
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.close)
+
+        # ホイールクリック（マウスホイールボタン押下＝中クリック）でも終了
+        # できるように。画像パネル／セクションパネルどちらの上でクリック
+        # しても、実際にイベントを受け取るのはその内側の子ウィジェット
+        # （QLabelやQTextEditなど）で、ここ（ViewerWindow）の
+        # mousePressEvent は呼ばれない。そのため個々のウィジェットに
+        # ハンドラを仕込むのではなく、アプリケーション全体のイベントを
+        # ここで横取りする eventFilter 方式にしている（下の eventFilter()
+        # 参照）。
+        QApplication.instance().installEventFilter(self)
 
         # --sync-channel: D-liner SDIウィンドウ等からの画像切替追従用。
         # 受信処理の実体は SyncListener（送信側は meta_viewer_launcher.py
@@ -507,12 +569,32 @@ class ViewerWindow(QMainWindow):
 
         if refresh_folder_list:
             self._refresh_folder_list(path)
+        self._update_position_label()
 
         self.setWindowTitle(f"Meta Viewer - {path.name}")
         if self.image_panel is not None:
             self.image_panel.load(path)
-        sections = analyze(path)
-        self.section_panel.set_sections(sections)
+        try:
+            result = analyze_detailed(path)
+            sections, source, warnings = result.sections, result.source, result.warnings
+        except Exception as e:
+            # analyze_detailed() walks untrusted, hand-crafted-by-ComfyUI
+            # JSON and does its own recursive graph logic -- unlike
+            # ImagePanel.load() just above (QPixmap/QMovie return isNull()
+            # on a bad file rather than raising), a malformed
+            # workflow/prompt chunk here is a plain Python exception that
+            # would otherwise propagate up through this Qt slot and crash
+            # the whole viewer. Image display has already succeeded by
+            # this point regardless, so degrade to an error card instead
+            # of taking the window down with it.
+            sections = [PromptSection(
+                "Error", "",
+                "メタデータの解析に失敗しました。\n"
+                f"詳細: {type(e).__name__}: {e}\n\n"
+                "画像自体は正常に表示されています。",
+            )]
+            source, warnings = "none", []
+        self.section_panel.set_sections(sections, source=source, warnings=warnings)
 
     def _refresh_folder_list(self, path: Path):
         """Lists every supported image in the same folder as `path`, sorted
@@ -544,6 +626,18 @@ class ViewerWindow(QMainWindow):
             self._folder_images = [path]
             self._current_index = 0
 
+    def _update_position_label(self):
+        """37 / 148 スタイルの現在位置表示。ホイール/矢印キーでの連続
+        切り替え中に今どこにいるか分からない、という指摘への対応。
+        フォルダ内が1枚だけ(単体ファイルを直接開いた場合含む)なら
+        邪魔にならないよう非表示にする。"""
+        total = len(self._folder_images)
+        if total <= 1 or not (0 <= self._current_index < total):
+            self._position_label.setText("")
+            return
+        current_name = self._folder_images[self._current_index].name
+        self._position_label.setText(f"{self._current_index + 1} / {total}    {current_name}")
+
     def _navigate(self, delta: int):
         if not self._folder_images:
             return
@@ -558,6 +652,25 @@ class ViewerWindow(QMainWindow):
         )
         if path:
             self.open_path(path)
+
+    def eventFilter(self, obj, event):
+        # ウィンドウ内のどこでホイールクリック（中クリック）されても終了
+        # できるようにするためのアプリケーション全体のイベント横取り。
+        # __init__ 側の QApplication.instance().installEventFilter(self)
+        # とセット（理由はそちらのコメント参照）。
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.MiddleButton):
+            self.close()
+            return True
+        return super().eventFilter(obj, event)
+
+    def closeEvent(self, event):
+        # installEventFilter で自分自身をアプリケーション全体に登録して
+        # いるため、ウィンドウを閉じる際に明示的に外しておかないと、
+        # 破棄済みのウィンドウへの参照がイベントフィルタチェーンに残り
+        # 続けてしまう。
+        QApplication.instance().removeEventFilter(self)
+        super().closeEvent(event)
 
     def dragEnterEvent(self, event):
         if self._supported_drop_path(event) is not None:
@@ -581,8 +694,18 @@ class ViewerWindow(QMainWindow):
 
     @staticmethod
     def _supported_drop_path(event) -> Path | None:
-        """Returns the first locally-supported image path in the drop's
-        URL list, or None if nothing droppable is present."""
+        """Returns a locally-supported image path from the drop, or None if
+        nothing droppable is present.
+
+        The toolbar text has said "画像/フォルダをドラッグ&ドロップ" (image
+        *or folder*) while this only ever accepted files -- a folder drop
+        was silently rejected. Now a dropped folder resolves to the first
+        supported image inside it (same filename-sort order
+        _refresh_folder_list uses), so dropping a folder opens it exactly
+        the way opening that folder's first image by hand would, and
+        wheel/arrow navigation across the rest of the folder works
+        immediately afterward via the normal open_path() -> 
+        _refresh_folder_list() path."""
         mime = event.mimeData()
         if not mime.hasUrls():
             return None
@@ -592,7 +715,22 @@ class ViewerWindow(QMainWindow):
             p = Path(url.toLocalFile())
             if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES:
                 return p
+            if p.is_dir():
+                first = ViewerWindow._first_supported_image_in(p)
+                if first is not None:
+                    return first
         return None
+
+    @staticmethod
+    def _first_supported_image_in(folder: Path) -> Path | None:
+        try:
+            files = sorted(
+                (f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in SUPPORTED_SUFFIXES),
+                key=lambda f: f.name,
+            )
+        except OSError:
+            return None
+        return files[0] if files else None
 
 
 def main():
